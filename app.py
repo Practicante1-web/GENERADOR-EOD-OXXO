@@ -435,11 +435,14 @@ col_alternativa = buscar_columna(df, ["Dónde compraría sino es en OXXO?"])
 
 # Busca una columna de tráfico/tiempo de llegada de forma flexible.
 col_trafico = (
-    buscar_columna_parcial(df, ["trafico", "promedio"])
-    or buscar_columna_parcial(df, ["tiempo", "llegada"])
-    or buscar_columna_parcial(df, ["tiempo", "traslado"])
+    buscar_columna_parcial(df, ["trafico"])
+    or buscar_columna_parcial(df, ["tiempo"])
+    or buscar_columna_parcial(df, ["llegada"])
+    or buscar_columna_parcial(df, ["traslado"])
+    or buscar_columna_parcial(df, ["minutos"])
+    or buscar_columna_parcial(df, ["tarda"])
+    or buscar_columna_parcial(df, ["demora"])
 )
-
 if col_tienda is None:
     st.error("No encontré la columna 'Nombre tienda estudiada'.")
     st.write(list(df.columns))
