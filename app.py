@@ -1,9 +1,7 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
-from datetime import datetime
-from docx import Document
-from docx.shared import Inches
+from zipfile import ZipFile, ZIP_DEFLATED
 
 # =========================================================
 # CONFIGURACIÓN
@@ -16,37 +14,46 @@ st.set_page_config(
 )
 
 st.title("🟢 Generador de Reporte EOD OXXO")
-st.write("Carga el archivo de encuestas y selecciona la tienda para generar la información del estudio.")
+st.write(
+    "Carga el CSV de encuestas y la plantilla Word para "
+    "generar el informe conservando su diseño."
+)
 
 # =========================================================
 # FUNCIONES
 # =========================================================
 
 def buscar_columna(df, nombres):
-    """
-    Busca una columna aunque tenga diferencias de mayúsculas,
-    espacios o caracteres.
-    """
     columnas = {
         str(c).strip().lower().replace(" ", "").replace("_", ""): c
         for c in df.columns
     }
 
     for nombre in nombres:
-        clave = nombre.strip().lower().replace(" ", "").replace("_", "")
+        clave = (
+            nombre.strip()
+            .lower()
+            .replace(" ", "")
+            .replace("_", "")
+        )
+
         if clave in columnas:
             return columnas[clave]
 
     return None
+
 
 def porcentaje(cantidad, total):
     if total == 0:
         return 0
     return round((cantidad / total) * 100)
 
+
 def tabla_frecuencia(df, columna):
     if columna is None or columna not in df.columns:
-        return pd.DataFrame()
+        return pd.DataFrame(
+            columns=["Respuesta", "Cantidad", "%"]
+        )
 
     datos = (
         df[columna]
@@ -58,7 +65,9 @@ def tabla_frecuencia(df, columna):
     datos = datos[datos != ""]
 
     if len(datos) == 0:
-        return pd.DataFrame()
+        return pd.DataFrame(
+            columns=["Respuesta", "Cantidad", "%"]
+        )
 
     tabla = datos.value_counts().reset_index()
     tabla.columns = ["Respuesta", "Cantidad"]
@@ -69,280 +78,127 @@ def tabla_frecuencia(df, columna):
 
     return tabla
 
+
 def formato_fecha(fecha):
-    if pd.isna(fecha):
+    if fecha is None or pd.isna(fecha):
         return ""
 
     return pd.to_datetime(fecha).strftime("%d/%m/%Y")
 
+
 def formato_fecha_hora(fecha):
-    if pd.isna(fecha):
+    if fecha is None or pd.isna(fecha):
         return ""
 
     return pd.to_datetime(fecha).strftime("%d/%m/%Y %H:%M")
 
-def crear_word(datos, manuales, tablas):
-    """
-    Genera un Word básico con la información del estudio.
-    Posteriormente podremos conectarlo directamente con
-    la plantilla visual definitiva.
-    """
 
-    doc = Document()
+def limpiar_texto(valor):
+    if valor is None:
+        return ""
 
-    doc.add_heading("REPORTE EOD", level=1)
+    return str(valor).strip()
 
-    doc.add_paragraph(
-        f"Tienda: {datos['tienda']}"
-    )
-
-    doc.add_paragraph(
-        "Estudio Origen – Destino"
-    )
-
-    doc.add_paragraph(
-        f"Periodo: {datos['periodo']}"
-    )
-
-    doc.add_paragraph(
-        f"N. de encuestas: {datos['encuestas']}"
-    )
-
-    doc.add_paragraph(
-        f"Inicio: {datos['inicio']}"
-    )
-
-    doc.add_paragraph(
-        f"Finalización: {datos['finalizacion']}"
-    )
-
-    doc.add_paragraph(
-        f"Día con más encuestas: {datos['dia_mas_encuestas']}"
-    )
-
-    doc.add_paragraph(
-        f"Cantidad ese día: {datos['cantidad_dia_mas']}"
-    )
-
-    doc.add_heading("PERFIL DEL CLIENTE", level=2)
-
-    doc.add_paragraph(
-        f"Edad promedio: {datos['edad_promedio']} años"
-    )
-
-    doc.add_paragraph(
-        f"Hombre: {datos['hombres']}"
-    )
-
-    doc.add_paragraph(
-        f"Mujer: {datos['mujeres']}"
-    )
-
-    doc.add_paragraph(
-        f"Estrato principal: {datos['estrato']}"
-    )
-
-    doc.add_paragraph(
-        f"Ocupación principal: {datos['ocupacion']}"
-    )
-
-    doc.add_heading(
-        "PRINCIPAL MOTIVO DE COMPRA",
-        level=2
-    )
-
-    if not tablas["motivo"].empty:
-        tabla = doc.add_table(
-            rows=1,
-            cols=3
-        )
-
-        tabla.style = "Table Grid"
-
-        tabla.rows[0].cells[0].text = "Motivo"
-        tabla.rows[0].cells[1].text = "Cantidad"
-        tabla.rows[0].cells[2].text = "%"
-
-        for _, fila in tablas["motivo"].iterrows():
-            celdas = tabla.add_row().cells
-            celdas[0].text = str(fila["Respuesta"])
-            celdas[1].text = str(fila["Cantidad"])
-            celdas[2].text = f"{fila['%']}%"
-
-    doc.add_heading(
-        "MEDIO DE LLEGADA",
-        level=2
-    )
-
-    if not tablas["transporte"].empty:
-        for _, fila in tablas["transporte"].iterrows():
-            doc.add_paragraph(
-                f"{fila['Respuesta']}: {fila['Cantidad']} ({fila['%']}%)"
-            )
-
-    # =====================================================
-    # PERCEPCIÓN MANUAL
-    # =====================================================
-
-    doc.add_heading(
-        "PERCEPCIÓN DEL SERVICIO",
-        level=2
-    )
-
-    doc.add_paragraph(
-        manuales["percepcion"]
-    )
-
-    # =====================================================
-    # ORIGEN - DESTINO
-    # =====================================================
-
-    doc.add_heading(
-        "ORIGEN – DESTINO",
-        level=2
-    )
-
-    if not tablas["origen"].empty:
-        doc.add_paragraph("De dónde viene:")
-
-        for _, fila in tablas["origen"].iterrows():
-            doc.add_paragraph(
-                f"{fila['Respuesta']}: {fila['Cantidad']} ({fila['%']}%)"
-            )
-
-    if not tablas["destino"].empty:
-        doc.add_paragraph("A dónde se dirige:")
-
-        for _, fila in tablas["destino"].iterrows():
-            doc.add_paragraph(
-                f"{fila['Respuesta']}: {fila['Cantidad']} ({fila['%']}%)"
-            )
-
-    # =====================================================
-    # ALTERNATIVA DE COMPRA
-    # =====================================================
-
-    doc.add_heading(
-        "ALTERNATIVA DE COMPRA",
-        level=2
-    )
-
-    if not tablas["alternativa"].empty:
-
-        tabla = doc.add_table(
-            rows=1,
-            cols=3
-        )
-
-        tabla.style = "Table Grid"
-
-        tabla.rows[0].cells[0].text = "Competidor"
-        tabla.rows[0].cells[1].text = "Respuestas"
-        tabla.rows[0].cells[2].text = "%"
-
-        for _, fila in tablas["alternativa"].iterrows():
-
-            celdas = tabla.add_row().cells
-
-            celdas[0].text = str(fila["Respuesta"])
-            celdas[1].text = str(fila["Cantidad"])
-            celdas[2].text = f"{fila['%']}%"
-
-    # =====================================================
-    # DATOS MANUALES
-    # =====================================================
-
-    doc.add_heading(
-        "INSIGHTS CLAVE",
-        level=2
-    )
-
-    doc.add_paragraph(
-        f"1. {manuales['insight1']}"
-    )
-
-    doc.add_paragraph(
-        f"2. {manuales['insight2']}"
-    )
-
-    doc.add_paragraph(
-        f"3. {manuales['insight3']}"
-    )
-
-    doc.add_heading(
-        "INFORMACIÓN MANUAL",
-        level=2
-    )
-
-    doc.add_paragraph(
-        f"Radio de influencia: {manuales['radio']}"
-    )
-
-    doc.add_paragraph(
-        f"¿Le hizo influencia?: {manuales['influencia']}"
-    )
-
-    doc.add_paragraph(
-        f"Observaciones: {manuales['observaciones']}"
-    )
-
-    # =====================================================
-    # FOTOGRAFÍAS
-    # =====================================================
-
-    if manuales["fotos"]:
-
-        doc.add_heading(
-            "REGISTRO FOTOGRÁFICO",
-            level=2
-        )
-
-        for foto in manuales["fotos"]:
-
-            doc.add_picture(
-                foto,
-                width=Inches(5)
-            )
-
-    buffer = BytesIO()
-
-    doc.save(buffer)
-
-    buffer.seek(0)
-
-    return buffer
 
 # =========================================================
-# CARGAR ARCHIVO
+# REEMPLAZO DE MARCADORES EN WORD
+# =========================================================
+#
+# IMPORTANTE:
+# La plantilla debe usar marcadores ÚNICOS.
+#
+# Ejemplos:
+# {{TIENDA}}
+# {{ENCUESTAS}}
+# {{ORIGEN_1}}
+# {{ORIGEN_1_CANT}}
+# {{ORIGEN_1_PCT}}
+#
+# NO usar [CANTIDAD], [PORCENTAJE], etc. repetidos.
 # =========================================================
 
-st.header("1. Cargar archivo de encuestas")
+def reemplazar_marcadores_en_docx(plantilla_bytes, reemplazos):
+
+    entrada = BytesIO(plantilla_bytes)
+    salida = BytesIO()
+
+    archivos_xml = [
+        "word/document.xml",
+        "word/header1.xml",
+        "word/header2.xml",
+        "word/header3.xml",
+        "word/footer1.xml",
+        "word/footer2.xml",
+        "word/footer3.xml",
+    ]
+
+    with ZipFile(entrada, "r") as zin, ZipFile(
+        salida,
+        "w",
+        ZIP_DEFLATED
+    ) as zout:
+
+        for item in zin.infolist():
+
+            data = zin.read(item.filename)
+
+            if item.filename in archivos_xml:
+                try:
+                    texto = data.decode("utf-8")
+
+                    for marcador, valor in reemplazos.items():
+                        texto = texto.replace(
+                            marcador,
+                            limpiar_texto(valor)
+                        )
+
+                    data = texto.encode("utf-8")
+
+                except Exception:
+                    pass
+
+            zout.writestr(item, data)
+
+    salida.seek(0)
+    return salida
+
+
+# =========================================================
+# CARGAR ARCHIVOS
+# =========================================================
+
+st.header("1. Archivos")
 
 archivo = st.file_uploader(
-    "Selecciona el archivo CSV",
+    "Selecciona el archivo CSV de encuestas",
     type=["csv"]
 )
 
-if archivo is None:
+plantilla = st.file_uploader(
+    "Selecciona la plantilla EOD en Word",
+    type=["docx"]
+)
 
+if archivo is None or plantilla is None:
     st.info(
-        "Primero carga el archivo EOD_OXXO."
+        "Carga el CSV y la plantilla Word para continuar."
     )
-
     st.stop()
 
+
 # =========================================================
-# LEER ARCHIVO
+# LEER CSV
 # =========================================================
 
 try:
+    archivo.seek(0)
 
     df = pd.read_csv(
         archivo,
         encoding="utf-8"
     )
 
-except:
+except Exception:
 
     archivo.seek(0)
 
@@ -350,6 +206,7 @@ except:
         archivo,
         encoding="latin-1"
     )
+
 
 df.columns = [
     str(c).strip()
@@ -359,6 +216,7 @@ df.columns = [
 st.success(
     f"Archivo cargado correctamente: {len(df)} encuestas."
 )
+
 
 # =========================================================
 # IDENTIFICAR COLUMNAS
@@ -444,13 +302,6 @@ col_alternativa = buscar_columna(
     ]
 )
 
-col_frecuencia = buscar_columna(
-    df,
-    [
-        "Cada cuanto visita la tienda a la semana?"
-    ]
-)
-
 # =========================================================
 # VALIDACIÓN
 # =========================================================
@@ -461,15 +312,11 @@ if col_tienda is None:
         "No encontré la columna 'Nombre tienda estudiada'."
     )
 
-    st.write(
-        "Columnas encontradas:"
-    )
-
-    st.write(
-        list(df.columns)
-    )
+    st.write("Columnas encontradas:")
+    st.write(list(df.columns))
 
     st.stop()
+
 
 # =========================================================
 # SELECCIONAR TIENDA
@@ -492,9 +339,6 @@ tienda_seleccionada = st.selectbox(
     tiendas
 )
 
-# =========================================================
-# FILTRAR
-# =========================================================
 
 datos_tienda = df[
     df[col_tienda]
@@ -502,6 +346,7 @@ datos_tienda = df[
     .str.strip()
     == tienda_seleccionada
 ].copy()
+
 
 # =========================================================
 # FECHAS
@@ -520,10 +365,7 @@ if col_fecha is not None:
         errors="coerce"
     )
 
-    fechas = (
-        datos_tienda[col_fecha]
-        .dropna()
-    )
+    fechas = datos_tienda[col_fecha].dropna()
 
     if len(fechas) > 0:
 
@@ -539,6 +381,7 @@ if col_fecha is not None:
         if len(conteo_dias) > 0:
 
             dia_mas_encuestas = conteo_dias.idxmax()
+
             cantidad_dia_mas = int(
                 conteo_dias.max()
             )
@@ -555,6 +398,7 @@ if col_fecha is not None:
                 if dia not in conteo_dias.index
             ]
 
+
 # =========================================================
 # INFORMACIÓN AUTOMÁTICA
 # =========================================================
@@ -563,7 +407,11 @@ st.header("3. Información automática")
 
 total_encuestas = len(datos_tienda)
 
-if col_fecha is not None and fecha_inicio is not None:
+if (
+    col_fecha is not None
+    and fecha_inicio is not None
+    and fecha_final is not None
+):
 
     if fecha_inicio.date() == fecha_final.date():
 
@@ -580,49 +428,46 @@ else:
 
     periodo = ""
 
+
 col1, col2, col3 = st.columns(3)
 
 with col1:
-
     st.metric(
         "Encuestas",
         total_encuestas
     )
 
 with col2:
-
     st.metric(
         "Inicio",
         formato_fecha_hora(fecha_inicio)
     )
 
 with col3:
-
     st.metric(
         "Finalización",
         formato_fecha_hora(fecha_final)
     )
 
+
 col4, col5, col6 = st.columns(3)
 
 with col4:
-
     st.metric(
         "Día con más encuestas",
         str(dia_mas_encuestas)
     )
 
 with col5:
-
     st.metric(
         "Cantidad ese día",
         cantidad_dia_mas
     )
 
 with col6:
-
     st.write("**Periodo**")
     st.write(periodo)
+
 
 if dias_sin_encuestas:
 
@@ -636,6 +481,7 @@ else:
     st.success(
         "No se encontraron días sin encuestas."
     )
+
 
 # =========================================================
 # PERFIL DEL CLIENTE
@@ -658,6 +504,7 @@ if col_edad is not None:
             edades.mean(),
             1
         )
+
 
 hombres = 0
 mujeres = 0
@@ -685,6 +532,7 @@ if col_genero is not None:
         ).sum()
     )
 
+
 estrato_tabla = tabla_frecuencia(
     datos_tienda,
     col_estrato
@@ -695,26 +543,26 @@ ocupacion_tabla = tabla_frecuencia(
     col_ocupacion
 )
 
+
 p1, p2, p3, p4 = st.columns(4)
 
 with p1:
-
     st.metric(
         "Edad promedio",
-        f"{edad_promedio} años"
-        if edad_promedio != ""
-        else "N/D"
+        (
+            f"{edad_promedio} años"
+            if edad_promedio != ""
+            else "N/D"
+        )
     )
 
 with p2:
-
     st.metric(
         "Hombres",
         hombres
     )
 
 with p3:
-
     st.metric(
         "Mujeres",
         mujeres
@@ -734,7 +582,10 @@ with p4:
 
         st.metric(
             "Estrato principal",
-            f"{estrato_principal} ({estrato_porcentaje}%)"
+            (
+                f"{estrato_principal} "
+                f"({estrato_porcentaje}%)"
+            )
         )
 
     else:
@@ -743,6 +594,7 @@ with p4:
             "Estrato principal",
             "N/D"
         )
+
 
 if not ocupacion_tabla.empty:
 
@@ -754,8 +606,9 @@ if not ocupacion_tabla.empty:
         hide_index=True
     )
 
+
 # =========================================================
-# TABLAS
+# TABLAS DEL ESTUDIO
 # =========================================================
 
 st.header("5. Información del estudio")
@@ -788,6 +641,7 @@ tablas = {
     )
 }
 
+
 t1, t2 = st.columns(2)
 
 with t1:
@@ -802,6 +656,7 @@ with t1:
         hide_index=True
     )
 
+
 with t2:
 
     st.subheader(
@@ -813,6 +668,7 @@ with t2:
         use_container_width=True,
         hide_index=True
     )
+
 
 t3, t4 = st.columns(2)
 
@@ -828,6 +684,7 @@ with t3:
         hide_index=True
     )
 
+
 with t4:
 
     st.subheader(
@@ -840,6 +697,7 @@ with t4:
         hide_index=True
     )
 
+
 st.subheader(
     "Alternativa de compra"
 )
@@ -850,6 +708,7 @@ st.dataframe(
     hide_index=True
 )
 
+
 # =========================================================
 # INFORMACIÓN MANUAL
 # =========================================================
@@ -857,22 +716,32 @@ st.dataframe(
 st.header("6. Información manual")
 
 st.info(
-    "Esta información la diligencias tú porque forma parte del análisis."
+    "Estos campos los diligencias tú porque corresponden "
+    "al análisis manual del estudio."
 )
 
 percepcion = st.text_area(
-    "Percepción del servicio",
-    placeholder="Escribe aquí la percepción del servicio..."
+    "Percepción del servicio"
 )
 
-radio = st.text_input(
-    "Radio de influencia",
-    placeholder="Ejemplo: 100m: 47 | 200m: 48 | 300m: 74 | +300m: 67"
+radio100 = st.text_input(
+    "Radio 100 m"
+)
+
+radio200 = st.text_input(
+    "Radio 200 m"
+)
+
+radio300 = st.text_input(
+    "Radio 300 m"
+)
+
+radio300mas = st.text_input(
+    "Radio +300 m"
 )
 
 influencia = st.text_area(
-    "¿Le hizo influencia?",
-    placeholder="Escribe aquí el análisis de influencia..."
+    "¿Le hizo influencia?"
 )
 
 observaciones = st.text_area(
@@ -882,19 +751,17 @@ observaciones = st.text_area(
 st.subheader("Insights clave")
 
 insight1 = st.text_area(
-    "Insight 1",
-    placeholder="Escribe el primer insight..."
+    "Insight 1"
 )
 
 insight2 = st.text_area(
-    "Insight 2",
-    placeholder="Escribe el segundo insight..."
+    "Insight 2"
 )
 
 insight3 = st.text_area(
-    "Insight 3",
-    placeholder="Escribe el tercer insight..."
+    "Insight 3"
 )
+
 
 # =========================================================
 # FOTOGRAFÍAS
@@ -905,87 +772,201 @@ st.subheader(
 )
 
 fotos = st.file_uploader(
-    "Sube las fotografías de la tienda",
+    "Sube las fotografías",
     type=["jpg", "jpeg", "png"],
     accept_multiple_files=True
 )
 
+
 # =========================================================
-# PREPARAR DATOS
+# CONSTRUIR REEMPLAZOS
+# =========================================================
+#
+# Cada campo tiene su propio marcador.
+# Así evitamos el problema anterior de que todos los
+# [CANTIDAD] y [%] se llenaran con el mismo dato.
 # =========================================================
 
-datos = {
+reemplazos = {
 
-    "tienda": tienda_seleccionada,
+    "{{TIENDA}}":
+        tienda_seleccionada,
 
-    "encuestas": total_encuestas,
+    "{{PERIODO}}":
+        periodo,
 
-    "periodo": periodo,
+    "{{ENCUESTAS}}":
+        total_encuestas,
 
-    "inicio": formato_fecha_hora(
-        fecha_inicio
-    ),
+    "{{INICIO}}":
+        formato_fecha_hora(fecha_inicio),
 
-    "finalizacion": formato_fecha_hora(
-        fecha_final
-    ),
+    "{{FINALIZACION}}":
+        formato_fecha_hora(fecha_final),
 
-    "dia_mas_encuestas":
-        str(dia_mas_encuestas),
+    "{{DIA_MAS_ENCUESTAS}}":
+        dia_mas_encuestas,
 
-    "cantidad_dia_mas":
+    "{{CANTIDAD_DIA_MAS}}":
         cantidad_dia_mas,
 
-    "edad_promedio":
+    "{{DIAS_SIN_ENCUESTAS}}":
+        (
+            ", ".join(dias_sin_encuestas)
+            if dias_sin_encuestas
+            else "Ninguno"
+        ),
+
+    "{{EDAD_PROMEDIO}}":
         edad_promedio,
 
-    "hombres":
+    "{{HOMBRES}}":
         hombres,
 
-    "mujeres":
+    "{{MUJERES}}":
         mujeres,
 
-    "estrato":
+    "{{ESTRATO}}":
         (
             estrato_tabla.iloc[0]["Respuesta"]
             if not estrato_tabla.empty
             else "N/D"
         ),
 
-    "ocupacion":
+    "{{ESTRATO_PCT}}":
+        (
+            f"{estrato_tabla.iloc[0]['%']}%"
+            if not estrato_tabla.empty
+            else "N/D"
+        ),
+
+    "{{OCUPACION}}":
         (
             ocupacion_tabla.iloc[0]["Respuesta"]
             if not ocupacion_tabla.empty
             else "N/D"
-        )
-}
+        ),
 
-manuales = {
+    "{{OCUPACION_PCT}}":
+        (
+            f"{ocupacion_tabla.iloc[0]['%']}%"
+            if not ocupacion_tabla.empty
+            else "N/D"
+        ),
 
-    "percepcion":
+    "{{PERCEPCION}}":
         percepcion,
 
-    "radio":
-        radio,
+    "{{RADIO_100}}":
+        radio100,
 
-    "influencia":
+    "{{RADIO_200}}":
+        radio200,
+
+    "{{RADIO_300}}":
+        radio300,
+
+    "{{RADIO_MAS_300}}":
+        radio300mas,
+
+    "{{INFLUENCIA}}":
         influencia,
 
-    "observaciones":
+    "{{OBSERVACIONES}}":
         observaciones,
 
-    "insight1":
+    "{{INSIGHT_1}}":
         insight1,
 
-    "insight2":
+    "{{INSIGHT_2}}":
         insight2,
 
-    "insight3":
+    "{{INSIGHT_3}}":
         insight3,
-
-    "fotos":
-        fotos
 }
+
+
+# =========================================================
+# AGREGAR DATOS DE TABLAS
+# =========================================================
+
+def agregar_filas(
+    reemplazos,
+    tabla,
+    prefijo,
+    max_filas=4
+):
+
+    for i in range(max_filas):
+
+        numero = i + 1
+
+        if i < len(tabla):
+
+            fila = tabla.iloc[i]
+
+            reemplazos[
+                f"{{{{{prefijo}_{numero}}}}}"
+            ] = fila["Respuesta"]
+
+            reemplazos[
+                f"{{{{{prefijo}_{numero}_CANT}}}}"
+            ] = fila["Cantidad"]
+
+            reemplazos[
+                f"{{{{{prefijo}_{numero}_PCT}}}}"
+            ] = f"{fila['%']}%"
+
+        else:
+
+            reemplazos[
+                f"{{{{{prefijo}_{numero}}}}}"
+            ] = ""
+
+            reemplazos[
+                f"{{{{{prefijo}_{numero}_CANT}}}}"
+            ] = ""
+
+            reemplazos[
+                f"{{{{{prefijo}_{numero}_PCT}}}}"
+            ] = ""
+
+
+agregar_filas(
+    reemplazos,
+    tablas["motivo"],
+    "MOTIVO",
+    3
+)
+
+agregar_filas(
+    reemplazos,
+    tablas["transporte"],
+    "TRANSPORTE",
+    4
+)
+
+agregar_filas(
+    reemplazos,
+    tablas["origen"],
+    "ORIGEN",
+    4
+)
+
+agregar_filas(
+    reemplazos,
+    tablas["destino"],
+    "DESTINO",
+    4
+)
+
+agregar_filas(
+    reemplazos,
+    tablas["alternativa"],
+    "ALTERNATIVA",
+    5
+)
+
 
 # =========================================================
 # GENERAR REPORTE
@@ -998,10 +979,13 @@ if st.button(
     type="primary"
 ):
 
-    documento = crear_word(
-        datos,
-        manuales,
-        tablas
+    plantilla.seek(0)
+
+    plantilla_bytes = plantilla.read()
+
+    documento = reemplazar_marcadores_en_docx(
+        plantilla_bytes,
+        reemplazos
     )
 
     nombre_archivo = (
@@ -1013,7 +997,7 @@ if st.button(
     )
 
     st.download_button(
-        label="📥 Descargar reporte Word",
+        label="📥 Descargar informe EOD",
         data=documento,
         file_name=nombre_archivo,
         mime=(
