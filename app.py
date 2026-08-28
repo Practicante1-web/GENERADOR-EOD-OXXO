@@ -1,16 +1,17 @@
 import streamlit as st
 import pandas as pd
-import re
 from io import BytesIO
-from datetime import datetime
+from pathlib import Path
 from docx import Document
+from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.text.paragraph import Paragraph
-from docx.oxml.ns import qn
-from docx.shared import Inches
+
 
 # =========================================================
 # CONFIGURACIÓN
 # =========================================================
+
 st.set_page_config(
     page_title="Generador EOD OXXO",
     page_icon="🟢",
@@ -18,634 +19,2229 @@ st.set_page_config(
 )
 
 st.title("🟢 Generador de Reporte EOD OXXO")
-st.write("Carga el CSV de encuestas y la Plantilla EOD para generar el reporte.")
+
+st.write(
+    "Carga el CSV de encuestas, selecciona la tienda y diligencia "
+    "la información que corresponde al análisis."
+)
+
 
 # =========================================================
-# FUNCIONES
+# PLANTILLA WORD
 # =========================================================
+
+# La plantilla debe estar en el mismo repositorio que app.py.
+# Nombre exacto:
+# Plantilla_EOD_OXXO.docx
+
+RUTA_PLANTILLA = (
+    Path(__file__).parent / "Plantilla_EOD_OXXO.docx"
+)
+
+
+# =========================================================
+# FUNCIONES DE DATOS
+# =========================================================
+
+def normalizar_texto(texto):
+    """
+    Normaliza texto para poder comparar nombres de columnas
+    aunque tengan diferencias de:
+    - mayúsculas
+    - tildes
+    - espacios
+    - guiones
+    - signos de interrogación
+    """
+
+    import unicodedata
+
+    texto = str(texto).strip().lower()
+
+    texto = unicodedata.normalize(
+        "NFD",
+        texto
+    )
+
+    texto = "".join(
+        c
+        for c in texto
+        if unicodedata.category(c) != "Mn"
+    )
+
+    texto = (
+        texto
+        .replace(" ", "")
+        .replace("_", "")
+        .replace("-", "")
+        .replace("¿", "")
+        .replace("?", "")
+        .replace("¡", "")
+        .replace("!", "")
+    )
+
+    return texto
+
+
 def buscar_columna(df, nombres):
+    """
+    Busca una columna tolerando diferencias de escritura.
+    """
+
     columnas = {
-        str(c).strip().lower().replace(" ", "").replace("_", ""): c
+        normalizar_texto(c): c
         for c in df.columns
     }
+
     for nombre in nombres:
-        clave = nombre.strip().lower().replace(" ", "").replace("_", "")
+
+        clave = normalizar_texto(nombre)
+
         if clave in columnas:
             return columnas[clave]
-    return None
 
-
-def buscar_columna_parcial(df, palabras):
-    for c in df.columns:
-        texto = str(c).strip().lower()
-        if all(p.lower() in texto for p in palabras):
-            return c
     return None
 
 
 def porcentaje(cantidad, total):
-    return round((cantidad / total) * 100) if total else 0
+
+    if total == 0:
+        return 0
+
+    return round(
+        (cantidad / total) * 100
+    )
 
 
 def tabla_frecuencia(df, columna):
-    if columna is None or columna not in df.columns:
-        return pd.DataFrame(columns=["Respuesta", "Cantidad", "%"])
 
-    datos = df[columna].dropna().astype(str).str.strip()
-    datos = datos[datos != ""]
+    if (
+        columna is None
+        or columna not in df.columns
+    ):
+        return pd.DataFrame(
+            columns=[
+                "Respuesta",
+                "Cantidad",
+                "%"
+            ]
+        )
+
+    datos = (
+        df[columna]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+
+    datos = datos[
+        datos != ""
+    ]
+
     if len(datos) == 0:
-        return pd.DataFrame(columns=["Respuesta", "Cantidad", "%"])
 
-    tabla = datos.value_counts().reset_index()
-    tabla.columns = ["Respuesta", "Cantidad"]
-    tabla["%"] = tabla["Cantidad"].apply(lambda x: porcentaje(x, len(datos)))
+        return pd.DataFrame(
+            columns=[
+                "Respuesta",
+                "Cantidad",
+                "%"
+            ]
+        )
+
+    tabla = (
+        datos
+        .value_counts()
+        .reset_index()
+    )
+
+    tabla.columns = [
+        "Respuesta",
+        "Cantidad"
+    ]
+
+    tabla["%"] = tabla["Cantidad"].apply(
+        lambda x:
+        porcentaje(
+            x,
+            len(datos)
+        )
+    )
+
     return tabla
 
 
 def formato_fecha(fecha):
-    if pd.isna(fecha) or fecha is None:
+
+    if (
+        fecha is None
+        or pd.isna(fecha)
+    ):
         return ""
-    return pd.to_datetime(fecha).strftime("%d/%m/%Y")
+
+    return pd.to_datetime(
+        fecha
+    ).strftime(
+        "%d/%m/%Y"
+    )
 
 
 def formato_fecha_hora(fecha):
-    if pd.isna(fecha) or fecha is None:
+
+    if (
+        fecha is None
+        or pd.isna(fecha)
+    ):
         return ""
-    return pd.to_datetime(fecha).strftime("%d/%m/%Y %H:%M")
+
+    return pd.to_datetime(
+        fecha
+    ).strftime(
+        "%d/%m/%Y %H:%M"
+    )
 
 
-def parse_minutos(valor):
-    if pd.isna(valor):
-        return None
-    s = str(valor).strip().lower().replace(",", ".")
-    m = re.search(r"(\d+(?:\.\d+)?)", s)
-    return float(m.group(1)) if m else None
+# =========================================================
+# FUNCIONES PARA EDITAR LA PLANTILLA WORD
+# =========================================================
+
+def obtener_parrafos_de_tablas(doc):
+    """
+    Obtiene todos los párrafos que están dentro de tablas.
+    """
+
+    for table in doc.tables:
+
+        for row in table.rows:
+
+            for cell in row.cells:
+
+                for paragraph in cell.paragraphs:
+
+                    yield paragraph
 
 
-def calcular_trafico_promedio(df, columna):
-    if columna is None:
-        return ""
-    valores = df[columna].apply(parse_minutos).dropna()
-    if len(valores) == 0:
-        return ""
-    return f"{round(valores.mean())} min"
+def obtener_todos_los_parrafos(doc):
+    """
+    Obtiene párrafos normales y párrafos dentro de tablas.
+    """
+
+    for paragraph in doc.paragraphs:
+        yield paragraph
+
+    for paragraph in obtener_parrafos_de_tablas(doc):
+        yield paragraph
 
 
-def reemplazar_en_parrafo(parrafo, reemplazos):
-    texto = "".join(run.text for run in parrafo.runs)
-    if not texto:
-        return
+def reemplazar_en_parrafos(
+    doc,
+    reemplazos
+):
+    """
+    Reemplaza placeholders que estén en párrafos normales.
+    """
 
-    nuevo = texto
-    for clave, valor in reemplazos.items():
-        nuevo = nuevo.replace(clave, str(valor))
+    for paragraph in doc.paragraphs:
 
-    if nuevo == texto:
-        return
+        for viejo, nuevo in reemplazos.items():
 
-    if parrafo.runs:
-        parrafo.runs[0].text = nuevo
-        for run in parrafo.runs[1:]:
-            run.text = ""
+            if viejo in paragraph.text:
 
+                for run in paragraph.runs:
 
-def reemplazar_en_tabla(tabla, reemplazos):
-    for fila in tabla.rows:
-        for celda in fila.cells:
-            for parrafo in celda.paragraphs:
-                reemplazar_en_parrafo(parrafo, reemplazos)
+                    if viejo in run.text:
 
-
-def reemplazar_documento(doc, reemplazos):
-    for parrafo in doc.paragraphs:
-        reemplazar_en_parrafo(parrafo, reemplazos)
-
-    for tabla in doc.tables:
-        reemplazar_en_tabla(tabla, reemplazos)
-
-    for seccion in doc.sections:
-        for header in [seccion.header, seccion.first_page_header]:
-            for p in header.paragraphs:
-                reemplazar_en_parrafo(p, reemplazos)
-            for t in header.tables:
-                reemplazar_en_tabla(t, reemplazos)
-        for footer in [seccion.footer, seccion.first_page_footer]:
-            for p in footer.paragraphs:
-                reemplazar_en_parrafo(p, reemplazos)
-            for t in footer.tables:
-                reemplazar_en_tabla(t, reemplazos)
+                        run.text = (
+                            run.text.replace(
+                                viejo,
+                                str(nuevo)
+                            )
+                        )
 
 
-def reemplazar_celda(celda, texto):
-    # Mantiene el estilo del primer run de la celda.
-    p = celda.paragraphs[0]
-    if p.runs:
-        p.runs[0].text = texto
-        for r in p.runs[1:]:
-            r.text = ""
-    else:
-        p.add_run(texto)
+def reemplazar_en_tablas(
+    doc,
+    reemplazos
+):
+    """
+    Reemplaza placeholders dentro de cualquier
+    celda de tabla.
+    """
 
-    # Limpia párrafos adicionales.
-    for p_extra in celda.paragraphs[1:]:
-        for r in p_extra.runs:
-            r.text = ""
+    for table in doc.tables:
 
+        for row in table.rows:
 
-def llenar_tabla_frecuencia(tabla, datos, columnas=(0, 1, 2), max_filas=None):
-    filas = tabla.rows
-    inicio = 1  # primera fila: encabezados
+            for cell in row.cells:
 
-    cantidad_filas_datos = len(filas) - inicio
-    limite = cantidad_filas_datos if max_filas is None else min(cantidad_filas_datos, max_filas)
+                for paragraph in cell.paragraphs:
 
-    for i in range(limite):
-        fila = filas[inicio + i]
-        if i < len(datos):
-            item = datos.iloc[i]
-            reemplazar_celda(fila.cells[columnas[0]], str(item["Respuesta"]))
-            reemplazar_celda(fila.cells[columnas[1]], str(item["Cantidad"]))
-            reemplazar_celda(fila.cells[columnas[2]], f'{item["%"]}%')
-        else:
-            for c in columnas:
-                reemplazar_celda(fila.cells[c], "")
+                    for viejo, nuevo in reemplazos.items():
+
+                        if viejo in paragraph.text:
+
+                            for run in paragraph.runs:
+
+                                if viejo in run.text:
+
+                                    run.text = (
+                                        run.text.replace(
+                                            viejo,
+                                            str(nuevo)
+                                        )
+                                    )
 
 
-def encontrar_tabla_por_texto(doc, texto):
-    texto = texto.lower()
-    for tabla in doc.tables:
-        contenido = " ".join(
-            celda.text.lower()
-            for fila in tabla.rows
-            for celda in fila.cells
+def reemplazar_placeholders(
+    doc,
+    reemplazos
+):
+
+    reemplazar_en_parrafos(
+        doc,
+        reemplazos
+    )
+
+    reemplazar_en_tablas(
+        doc,
+        reemplazos
+    )
+
+
+def escribir_celda(
+    cell,
+    texto,
+    bold=False
+):
+    """
+    Escribe texto en una celda.
+    """
+
+    cell.text = ""
+
+    paragraph = cell.paragraphs[0]
+
+    paragraph.alignment = (
+        WD_ALIGN_PARAGRAPH.CENTER
+    )
+
+    run = paragraph.add_run(
+        str(texto)
+    )
+
+    run.bold = bold
+
+    run.font.size = Pt(8.5)
+
+
+def limpiar_celda(cell):
+
+    cell.text = ""
+
+
+# =========================================================
+# LLENAR TABLAS
+# =========================================================
+
+def llenar_tabla_frecuencia(
+    table,
+    tabla_datos,
+    max_filas=None
+):
+    """
+    Llena una tabla EXISTENTE de la plantilla.
+    No crea una tabla nueva.
+    """
+
+    if max_filas is None:
+
+        max_filas = (
+            len(table.rows) - 1
         )
-        if texto in contenido:
-            return tabla
-    return None
+
+    datos = tabla_datos.head(
+        max_filas
+    )
+
+    for i in range(max_filas):
+
+        fila = table.rows[i + 1]
+
+        if i < len(datos):
+
+            dato = datos.iloc[i]
+
+            escribir_celda(
+                fila.cells[0],
+                dato["Respuesta"]
+            )
+
+            escribir_celda(
+                fila.cells[1],
+                int(dato["Cantidad"])
+            )
+
+            escribir_celda(
+                fila.cells[2],
+                f"{int(dato['%'])}%"
+            )
+
+        else:
+
+            for cell in fila.cells:
+
+                limpiar_celda(
+                    cell
+                )
 
 
-def reemplazar_imagen_despues_de_titulo(doc, titulo, imagen_bytes):
-    """Reemplaza la primera imagen del párrafo inmediatamente posterior al título."""
-    if not imagen_bytes:
+# =========================================================
+# IMÁGENES
+# =========================================================
+
+def poner_imagen_en_celda(
+    cell,
+    imagen,
+    texto_placeholder=None,
+    ancho=5.8
+):
+    """
+    Borra el contenido de una celda e inserta
+    una imagen.
+    """
+
+    cell.text = ""
+
+    paragraph = cell.paragraphs[0]
+
+    paragraph.alignment = (
+        WD_ALIGN_PARAGRAPH.CENTER
+    )
+
+    if imagen is None:
+
+        if texto_placeholder:
+
+            run = paragraph.add_run(
+                texto_placeholder
+            )
+
+            run.bold = True
+            run.font.size = Pt(8.5)
+
+        return
+
+    try:
+
+        imagen.seek(0)
+
+        run = paragraph.add_run()
+
+        run.add_picture(
+            imagen,
+            width=Inches(ancho)
+        )
+
+    except Exception as e:
+
+        paragraph.text = (
+            f"No se pudo insertar la imagen: {e}"
+        )
+
+
+# =========================================================
+# FOTO FACHADA
+# =========================================================
+
+def insertar_foto_fachada(
+    doc,
+    imagen
+):
+    """
+    Busca [NOMBRE TIENDA] antes de reemplazarlo
+    y coloca la foto inmediatamente debajo.
+
+    Funciona tanto si el placeholder está en un
+    párrafo normal como dentro de una tabla.
+    """
+
+    if imagen is None:
+        return
+
+    for paragraph in obtener_todos_los_parrafos(doc):
+
+        if "[NOMBRE TIENDA]" in paragraph.text:
+
+            try:
+
+                # Crear nuevo elemento de párrafo
+                nuevo_p = paragraph._p.__class__()
+
+                paragraph._p.addnext(
+                    nuevo_p
+                )
+
+                nuevo_parrafo = Paragraph(
+                    nuevo_p,
+                    paragraph._parent
+                )
+
+                nuevo_parrafo.alignment = (
+                    WD_ALIGN_PARAGRAPH.CENTER
+                )
+
+                run = nuevo_parrafo.add_run()
+
+                imagen.seek(0)
+
+                run.add_picture(
+                    imagen,
+                    width=Inches(3.5)
+                )
+
+                return
+
+            except Exception as e:
+
+                st.warning(
+                    "No se pudo insertar la foto "
+                    f"de fachada: {e}"
+                )
+
+                return
+
+
+# =========================================================
+# IMAGEN POR PLACEHOLDER
+# =========================================================
+
+def poner_imagen_por_placeholder(
+    doc,
+    placeholder,
+    imagen,
+    ancho=5.8
+):
+    """
+    Busca un placeholder de imagen dentro
+    de las tablas de la plantilla.
+    """
+
+    if imagen is None:
         return False
 
-    body = doc.element.body
-    elementos = list(body.iterchildren())
+    for table in doc.tables:
 
-    for i, elem in enumerate(elementos):
-        if elem.tag == qn("w:p"):
-            p = Paragraph(elem, doc)
-            if titulo.lower() in p.text.lower():
-                for siguiente in elementos[i + 1:]:
-                    if siguiente.tag == qn("w:p"):
-                        p2 = Paragraph(siguiente, doc)
-                        blips = p2._p.xpath(".//a:blip")
-                        if blips:
-                            rid = blips[0].get(qn("r:embed"))
-                            part = doc.part.related_parts.get(rid)
-                            if part is not None and hasattr(part, "_blob"):
-                                part._blob = image_bytes
-                                return True
-                        # Si encontramos texto antes de una imagen, seguimos buscando.
-                    elif siguiente.tag == qn("w:tbl"):
-                        continue
+        for row in table.rows:
+
+            for cell in row.cells:
+
+                if placeholder in cell.text:
+
+                    poner_imagen_en_celda(
+                        cell,
+                        imagen,
+                        ancho=ancho
+                    )
+
+                    return True
+
     return False
 
 
-def insertar_imagen_en_lugar_de_parrafo(doc, marcador, imagen_bytes, ancho=2.2):
-    if not imagen_bytes:
-        return False
+# =========================================================
+# REGISTRO FOTOGRÁFICO
+# =========================================================
 
-    encontrado = False
-    for parrafo in doc.paragraphs:
-        if marcador.lower() in parrafo.text.lower():
-            parrafo.text = ""
-            run = parrafo.add_run()
-            run.add_picture(BytesIO(imagen_bytes), width=Inches(ancho))
-            encontrado = True
+def llenar_registro_fotografico(
+    doc,
+    fotos
+):
+    """
+    La plantilla tiene cuatro espacios:
 
-    for tabla in doc.tables:
-        for fila in tabla.rows:
-            for celda in fila.cells:
-                for parrafo in celda.paragraphs:
-                    if marcador.lower() in parrafo.text.lower():
-                        parrafo.text = ""
-                        run = parrafo.add_run()
-                        run.add_picture(BytesIO(imagen_bytes), width=Inches(ancho))
-                        encontrado = True
-    return encontrado
+    FOTO 1 | FOTO 2
+    FOTO 3 | FOTO 4
+    """
 
+    tabla_fotos = None
 
-def agregar_foto_en_celda(celda, imagen_bytes, ancho=1.8):
-    if not imagen_bytes:
+    for table in doc.tables:
+
+        texto = " ".join(
+            cell.text
+            for row in table.rows
+            for cell in row.cells
+        )
+
+        if (
+            "[FOTO_1]" in texto
+            and "[FOTO_4]" in texto
+        ):
+
+            tabla_fotos = table
+
+            break
+
+    if tabla_fotos is None:
         return
-    p = celda.paragraphs[0]
-    p.text = ""
-    run = p.add_run()
-    run.add_picture(BytesIO(imagen_bytes), width=Inches(ancho))
+
+    celdas = [
+
+        tabla_fotos.cell(0, 0),
+
+        tabla_fotos.cell(0, 1),
+
+        tabla_fotos.cell(1, 0),
+
+        tabla_fotos.cell(1, 1)
+
+    ]
+
+    for i, cell in enumerate(celdas):
+
+        if i < len(fotos):
+
+            poner_imagen_en_celda(
+                cell,
+                fotos[i],
+                ancho=2.75
+            )
+
+        else:
+
+            limpiar_celda(
+                cell
+            )
 
 
-def llenar_fotos_registro(doc, fotos):
-    if not fotos:
-        return
+# =========================================================
+# INSIGHTS
+# =========================================================
 
-    # Busca la sección REGISTRO FOTOGRÁFICO y utiliza los
-    # cuadros/espacios de las tablas cercanas cuando existen.
-    for tabla in doc.tables:
-        texto = " ".join(c.text.lower() for row in tabla.rows for c in row.cells)
-        if "registro fotográfico" in texto:
-            # Si la tabla tiene celdas vacías, las utiliza.
-            celdas = [c for row in tabla.rows for c in row.cells]
-            vacias = [c for c in celdas if not c.text.strip()]
-            for i, foto in enumerate(fotos[:3]):
-                if i < len(vacias):
-                    agregar_foto_en_celda(vacias[i], foto, 1.7)
-            return
+def llenar_insights(
+    doc,
+    insights
+):
 
-    # Alternativa: insertar después del texto del título.
-    for p in doc.paragraphs:
-        if p.text.strip().lower() == "registro fotográfico":
-            for foto in fotos[:3]:
-                run = p.add_run()
-                run.add_picture(BytesIO(foto), width=Inches(1.7))
-                p.add_run("   ")
-            return
+    placeholders = [
+
+        "[INSIGHT_1]",
+
+        "[INSIGHT_2]",
+
+        "[INSIGHT_3]"
+
+    ]
+
+    reemplazos = {}
+
+    for placeholder, texto in zip(
+        placeholders,
+        insights
+    ):
+
+        reemplazos[
+            placeholder
+        ] = texto
+
+    reemplazar_placeholders(
+        doc,
+        reemplazos
+    )
 
 
-def crear_reporte(template_bytes, datos, tablas, manuales, imagenes):
-    doc = Document(BytesIO(template_bytes))
+# =========================================================
+# LLENAR TABLAS DE LA PLANTILLA
+# =========================================================
+
+def llenar_datos_de_tablas(
+    doc,
+    tablas
+):
+    """
+    Identifica las tablas por sus encabezados.
+
+    Importante:
+    La tabla de ALTERNATIVA DE COMPRA se identifica
+    mediante:
+
+    COMPETIDOR
+    CANTIDAD
+    %
+
+    Esto evita que quede vacía.
+    """
+
+    contador_lugar = 0
+
+    for table in doc.tables:
+
+        if not table.rows:
+            continue
+
+        encabezados = [
+
+            cell.text
+            .strip()
+            .upper()
+
+            for cell in table.rows[0].cells
+
+        ]
+
+        texto_tabla = " ".join(
+            encabezados
+        )
+
+        # -------------------------------------------------
+        # OCUPACIÓN
+        # -------------------------------------------------
+
+        if (
+            "OCUPACIÓN" in texto_tabla
+            and "CANTIDAD" in texto_tabla
+            and "%" in texto_tabla
+        ):
+
+            llenar_tabla_frecuencia(
+                table,
+                tablas["ocupacion"]
+            )
+
+
+        # -------------------------------------------------
+        # MOTIVO
+        # -------------------------------------------------
+
+        elif (
+            "MOTIVO" in texto_tabla
+            and "CANTIDAD" in texto_tabla
+            and "%" in texto_tabla
+        ):
+
+            llenar_tabla_frecuencia(
+                table,
+                tablas["motivo"]
+            )
+
+
+        # -------------------------------------------------
+        # TRANSPORTE
+        # -------------------------------------------------
+
+        elif (
+            "MEDIO DE TRANSPORTE" in texto_tabla
+            and "CANTIDAD" in texto_tabla
+            and "%" in texto_tabla
+        ):
+
+            llenar_tabla_frecuencia(
+                table,
+                tablas["transporte"]
+            )
+
+
+        # -------------------------------------------------
+        # ALTERNATIVA DE COMPRA
+        # -------------------------------------------------
+
+        elif (
+            "COMPETIDOR" in texto_tabla
+            and "CANTIDAD" in texto_tabla
+            and "%" in texto_tabla
+        ):
+
+            llenar_tabla_frecuencia(
+                table,
+                tablas["alternativa"]
+            )
+
+
+        # -------------------------------------------------
+        # ORIGEN / DESTINO
+        # -------------------------------------------------
+
+        elif (
+            "LUGAR" in texto_tabla
+            and "CANTIDAD" in texto_tabla
+            and "%" in texto_tabla
+        ):
+
+            if contador_lugar == 0:
+
+                llenar_tabla_frecuencia(
+                    table,
+                    tablas["origen"]
+                )
+
+            else:
+
+                llenar_tabla_frecuencia(
+                    table,
+                    tablas["destino"]
+                )
+
+            contador_lugar += 1
+
+
+# =========================================================
+# CREAR WORD
+# =========================================================
+
+def crear_word(
+    datos,
+    manuales,
+    tablas
+):
+
+    """
+    Abre la plantilla existente y llena sus campos.
+
+    NO reconstruye el diseño.
+    """
+
+    if not RUTA_PLANTILLA.exists():
+
+        raise FileNotFoundError(
+            "No se encontró 'Plantilla_EOD_OXXO.docx'. "
+            "Guarda ese archivo en el mismo repositorio "
+            "donde está app.py."
+        )
+
+    # -----------------------------------------------------
+    # ABRIR PLANTILLA
+    # -----------------------------------------------------
+
+    doc = Document(
+        str(RUTA_PLANTILLA)
+    )
+
+
+    # -----------------------------------------------------
+    # FOTO DE FACHADA
+    # -----------------------------------------------------
+    # IMPORTANTE:
+    # Se hace ANTES de reemplazar [NOMBRE TIENDA],
+    # porque la función necesita encontrar ese placeholder.
+
+    insertar_foto_fachada(
+        doc,
+        manuales["foto_fachada"]
+    )
+
+
+    # -----------------------------------------------------
+    # CAMPOS PRINCIPALES
+    # -----------------------------------------------------
 
     reemplazos = {
-        "[NOMBRE TIENDA / CR]": datos["tienda"],
-        "[PERIODO]": datos["periodo"],
-        "[NUM_ENCUESTAS]": datos["encuestas"],
-        "[AUTOMATICO]": datos["encuestas"],
-        "[FECHA_INICIO]": datos["fecha_inicio"],
-        "[HORA_INICIO]": datos["hora_inicio"],
-        "[FECHA_FINALIZACION]": datos["fecha_finalizacion"],
-        "[HORA_FINALIZACION]": datos["hora_finalizacion"],
-        "[DIA_MAS_ENCUESTAS]": datos["dia_mas_encuestas"],
-        "[DIAS_SIN_ENCUESTAS]": datos["dias_sin_encuestas"],
 
-        "[EDAD]": datos["edad_promedio"],
-        "[CANTIDAD HOMBRE]": datos["hombres"],
-        "[CANTIDAD HOMBRE]": datos["hombres"],
-        "[CANTIDAD MUJER]": datos["mujeres"],
-        "[ESTRATO]": datos["estrato"],
-        "[ESTRATO_PORCENTAJE]": datos["estrato_porcentaje"],
-        "[OCUPACIÓN]": datos["ocupacion"],
-        "[OCUPACION_PORCENTAJE]": datos["ocupacion_porcentaje"],
-        "[PERCEPCIÓN]": manuales["percepcion"],
-        "[COMENTARIO PERCEPCIÓN]": manuales["percepcion_comentario"],
-        "[TRAFICO_PROMEDIO]": datos["trafico_promedio"],
-        "[TRÁFICO PROMEDIO]": datos["trafico_promedio"],
+        "[NOMBRE TIENDA]":
+            datos["tienda"],
+
+        "[PERIODO]":
+            datos["periodo"],
+
+        "[FECHA_INICIO]":
+            datos["inicio"],
+
+        "[FECHA_FIN]":
+            datos["finalizacion"],
+
+        "[N_ENCUESTAS]":
+            datos["encuestas"],
+
+        "[DIA_MAS]":
+            datos["dia_mas_encuestas"],
+
+        "[CANTIDAD_DIA_MAS]":
+            datos["cantidad_dia_mas"],
+
+        "[EDAD_PROMEDIO]":
+            datos["edad_promedio"],
+
+        "[HOMBRES]":
+            datos["hombres"],
+
+        "[MUJERES]":
+            datos["mujeres"],
+
+        "[ESTRATO_PRINCIPAL]":
+            datos["estrato"],
+
+        "[ESTRATO_PORCENTAJE]":
+            datos["estrato_porcentaje"],
+
+        "[PERCEPCION_SERVICIO]":
+            manuales["percepcion"],
+
+        "[RADIO_INFLUENCIA]":
+            manuales["radio"]
+
     }
 
-    # Datos de motivo de compra.
-    for i in range(4):
-        if i < len(tablas["motivo"]):
-            r = tablas["motivo"].iloc[i]
-            reemplazos[f"[MOTIVO {i+1}]"] = r["Respuesta"]
-            reemplazos[f"[CANTIDAD {i+1}]"] = r["Cantidad"]
-            reemplazos[f"[PORCENTAJE {i+1}]"] = f'{r["%"]}'
-        else:
-            reemplazos[f"[MOTIVO {i+1}]"] = ""
-            reemplazos[f"[CANTIDAD {i+1}]"] = ""
-            reemplazos[f"[PORCENTAJE {i+1}]"] = ""
+    reemplazar_placeholders(
+        doc,
+        reemplazos
+    )
 
-    # Medio de llegada.
-    nombres_transporte = ["A pie", "Moto", "Automóvil", "Otro"]
-    for i, nombre in enumerate(nombres_transporte, start=1):
-        coincidencia = tablas["transporte"][
-            tablas["transporte"]["Respuesta"].str.lower().str.contains(
-                nombre.lower().replace("ó", "o"), regex=False
-            )
-        ] if not tablas["transporte"].empty else pd.DataFrame()
 
-        if not coincidencia.empty:
-            r = coincidencia.iloc[0]
-            valor = f'{r["Cantidad"]}'
-        else:
-            valor = ""
-        reemplazos[f"[{nombre.upper()}]"] = valor
+    # -----------------------------------------------------
+    # TABLAS
+    # -----------------------------------------------------
 
-    # Origen y destino se rellenan directamente en su tabla para evitar
-    # conflictos entre [CANTIDAD] y [%] de origen y destino.
+    llenar_datos_de_tablas(
+        doc,
+        tablas
+    )
 
-    # Radio: solo los números son manuales; 100m/200m/300m/+300m permanecen en plantilla.
-    reemplazos["[RADIO_100]"] = manuales["radio_100"]
-    reemplazos["[RADIO_200]"] = manuales["radio_200"]
-    reemplazos["[RADIO_300]"] = manuales["radio_300"]
-    reemplazos["[RADIO_MAS_300]"] = manuales["radio_mas_300"]
 
-    reemplazos["[INSIGHTS 1]"] = manuales["insight1"]
-    reemplazos["[INSIGHTS 2]"] = manuales["insight2"]
-    reemplazos["[INSIGHTS 3]"] = manuales["insight3"]
+    # -----------------------------------------------------
+    # INSIGHTS
+    # -----------------------------------------------------
 
-    reemplazar_documento(doc, reemplazos)
+    llenar_insights(
+        doc,
+        [
 
-    # Tabla de alternativa de compra.
-    tabla_alt = encontrar_tabla_por_texto(doc, "competidor")
-    if tabla_alt is not None and not tablas["alternativa"].empty:
-        llenar_tabla_frecuencia(tabla_alt, tablas["alternativa"], max_filas=5)
+            manuales["insight1"],
 
-    # Tabla origen-destino: sustituye las filas de datos.
-    tabla_od = encontrar_tabla_por_texto(doc, "de dónde viene")
-    if tabla_od is not None:
-        origen = tablas["origen"].head(4)
-        destino = tablas["destino"].head(4)
-        for i in range(4):
-            if i + 1 >= len(tabla_od.rows):
-                break
-            fila = tabla_od.rows[i + 1]
-            if i < len(origen):
-                r = origen.iloc[i]
-                reemplazar_celda(fila.cells[0], f'{r["Respuesta"]}: {r["Cantidad"]} ({r["%"]}%)')
-            else:
-                reemplazar_celda(fila.cells[0], "")
-            if i < len(destino):
-                r = destino.iloc[i]
-                reemplazar_celda(fila.cells[1], f'{r["Respuesta"]}: {r["Cantidad"]} ({r["%"]}%)')
-            else:
-                reemplazar_celda(fila.cells[1], "")
+            manuales["insight2"],
 
-    # Fotografías: fachada y mapas.
-    if imagenes.get("fachada"):
-        insertar_imagen_en_lugar_de_parrafo(doc, "Foto fachada", imagenes["fachada"], 2.8)
+            manuales["insight3"]
 
-    if imagenes.get("radio"):
-        reemplazar_imagen_despues_de_titulo(doc, "RADIO DE INFLUENCIA", imagenes["radio"])
+        ]
+    )
 
-    if imagenes.get("isocrona"):
-        reemplazar_imagen_despues_de_titulo(doc, "ISÓCRONA DE INFLUENCIA", imagenes["isocrona"])
 
-    llenar_fotos_registro(doc, imagenes.get("fotos", []))
+    # -----------------------------------------------------
+    # IMAGEN RADIO
+    # -----------------------------------------------------
 
-    # Elimina el marcador de comentario de percepción si no fue usado.
-    reemplazar_documento(doc, {
-        "[PERCEPCION_COMENTARIO]": manuales["percepcion_comentario"],
-        "[COMENTARIO PERCEPCIÓN]": manuales["percepcion_comentario"],
-    })
+    poner_imagen_por_placeholder(
+
+        doc,
+
+        "[PEGAR AQUÍ / IMAGEN DEL RADIO DE INFLUENCIA]",
+
+        manuales["imagen_radio"],
+
+        ancho=5.8
+
+    )
+
+
+    # -----------------------------------------------------
+    # IMAGEN ISÓCRONA
+    # -----------------------------------------------------
+
+    poner_imagen_por_placeholder(
+
+        doc,
+
+        "[PEGAR AQUÍ / IMAGEN DE LA ISÓCRONA]",
+
+        manuales["imagen_isocrona"],
+
+        ancho=5.8
+
+    )
+
+
+    # -----------------------------------------------------
+    # REGISTRO FOTOGRÁFICO
+    # -----------------------------------------------------
+
+    llenar_registro_fotografico(
+
+        doc,
+
+        manuales["fotos"]
+
+    )
+
+
+    # -----------------------------------------------------
+    # GENERAR ARCHIVO
+    # -----------------------------------------------------
 
     buffer = BytesIO()
-    doc.save(buffer)
+
+    doc.save(
+        buffer
+    )
+
     buffer.seek(0)
+
     return buffer
 
 
 # =========================================================
-# CARGA DE ARCHIVOS
+# 1. CARGAR CSV
 # =========================================================
-st.header("1. Archivos")
 
-archivo_csv = st.file_uploader("Selecciona el archivo CSV de encuestas", type=["csv"])
-archivo_plantilla = st.file_uploader(
-    "Selecciona la Plantilla EOD (la que preparaste en Word)",
-    type=["docx"]
+st.header(
+    "1. Cargar archivo de encuestas"
 )
 
-if archivo_csv is None or archivo_plantilla is None:
-    st.info("Carga los dos archivos para continuar.")
+archivo = st.file_uploader(
+
+    "Selecciona el archivo CSV de encuestas",
+
+    type=["csv"]
+
+)
+
+if archivo is None:
+
+    st.info(
+        "Primero carga el archivo EOD_OXXO."
+    )
+
     st.stop()
+
+
+# =========================================================
+# LEER CSV
+# =========================================================
 
 try:
-    df = pd.read_csv(archivo_csv, encoding="utf-8")
+
+    df = pd.read_csv(
+
+        archivo,
+
+        encoding="utf-8"
+
+    )
+
 except Exception:
-    archivo_csv.seek(0)
-    df = pd.read_csv(archivo_csv, encoding="latin-1")
 
-df.columns = [str(c).strip() for c in df.columns]
+    archivo.seek(0)
 
-st.success(f"CSV cargado: {len(df)} registros.")
+    df = pd.read_csv(
 
-# =========================================================
-# COLUMNAS
-# =========================================================
-col_fecha = buscar_columna(df, ["CreationDate", "Creation Date", "Fecha"])
-col_tienda = buscar_columna(df, ["Nombre tienda estudiada"])
-col_edad = buscar_columna(df, ["Edad"])
-col_genero = buscar_columna(df, ["Género", "Genero"])
-col_estrato = buscar_columna(df, ["Estrato"])
-col_ocupacion = buscar_columna(df, ["Ocupación actual", "Ocupacion actual"])
-col_motivo = buscar_columna(df, ["Por qué compraría ahí?"])
-col_transporte = buscar_columna(df, ["Medio de transporte usado para llegar a OXXO"])
-col_origen = buscar_columna(df, ["De dónde viene?"])
-col_destino = buscar_columna(df, ["Hacia dónde se dirige?"])
-col_alternativa = buscar_columna(df, ["Dónde compraría sino es en OXXO?"])
+        archivo,
 
-# Busca una columna de tráfico/tiempo de llegada de forma flexible.
-col_trafico = (
-    buscar_columna_parcial(df, ["trafico", "promedio"])
-    or buscar_columna_parcial(df, ["tiempo", "llegada"])
-    or buscar_columna_parcial(df, ["tiempo", "traslado"])
+        encoding="latin-1"
+
+    )
+
+
+df.columns = [
+
+    str(c).strip()
+
+    for c in df.columns
+
+]
+
+
+st.success(
+
+    f"Archivo cargado correctamente: "
+    f"{len(df)} encuestas."
+
 )
+
+
+# =========================================================
+# IDENTIFICAR COLUMNAS
+# =========================================================
+
+col_fecha = buscar_columna(
+
+    df,
+
+    [
+
+        "CreationDate",
+
+        "Creation Date"
+
+    ]
+
+)
+
+
+col_tienda = buscar_columna(
+
+    df,
+
+    [
+
+        "Nombre tienda estudiada"
+
+    ]
+
+)
+
+
+col_edad = buscar_columna(
+
+    df,
+
+    [
+
+        "Edad"
+
+    ]
+
+)
+
+
+col_genero = buscar_columna(
+
+    df,
+
+    [
+
+        "Género",
+
+        "Genero"
+
+    ]
+
+)
+
+
+col_estrato = buscar_columna(
+
+    df,
+
+    [
+
+        "Estrato"
+
+    ]
+
+)
+
+
+col_ocupacion = buscar_columna(
+
+    df,
+
+    [
+
+        "Ocupación actual",
+
+        "Ocupacion actual"
+
+    ]
+
+)
+
+
+col_motivo = buscar_columna(
+
+    df,
+
+    [
+
+        "Por qué compraría ahí?"
+
+    ]
+
+)
+
+
+col_transporte = buscar_columna(
+
+    df,
+
+    [
+
+        "Medio de transporte usado para llegar a OXXO"
+
+    ]
+
+)
+
+
+col_origen = buscar_columna(
+
+    df,
+
+    [
+
+        "De dónde viene?"
+
+    ]
+
+)
+
+
+col_destino = buscar_columna(
+
+    df,
+
+    [
+
+        "Hacia dónde se dirige?"
+
+    ]
+
+)
+
+
+# =========================================================
+# ALTERNATIVA DE COMPRA
+# =========================================================
+# Se incluyen varias posibles formas del encabezado
+# para evitar que la columna quede sin identificar.
+
+col_alternativa = buscar_columna(
+
+    df,
+
+    [
+
+        "Dónde compraría sino es en OXXO?",
+
+        "Dónde compraría si no es en OXXO?",
+
+        "Dónde compraría si no fuera en OXXO?",
+
+        "Donde compraria sino es en OXXO?",
+
+        "Donde compraria si no es en OXXO?",
+
+        "Donde compraria si no fuera en OXXO?"
+
+    ]
+
+)
+
+
+# =========================================================
+# VALIDACIÓN
+# =========================================================
 
 if col_tienda is None:
-    st.error("No encontré la columna 'Nombre tienda estudiada'.")
-    st.write(list(df.columns))
+
+    st.error(
+
+        "No encontré la columna "
+        "'Nombre tienda estudiada'."
+
+    )
+
+    st.write(
+        "Columnas encontradas:"
+    )
+
+    st.write(
+        list(df.columns)
+    )
+
     st.stop()
 
+
 # =========================================================
-# TIENDA
+# 2. SELECCIONAR TIENDA
 # =========================================================
-st.header("2. Seleccionar tienda")
+
+st.header(
+    "2. Seleccionar tienda"
+)
+
+
+tiendas = (
+
+    df[col_tienda]
+
+    .dropna()
+
+    .astype(str)
+
+    .str.strip()
+
+    .unique()
+
+)
+
 
 tiendas = sorted(
-    df[col_tienda].dropna().astype(str).str.strip().unique()
+    tiendas
 )
-tienda = st.selectbox("Selecciona el CR / tienda", tiendas)
+
+
+tienda_seleccionada = st.selectbox(
+
+    "Selecciona el CR / tienda",
+
+    tiendas
+
+)
+
+
+# =========================================================
+# FOTO DE FACHADA
+# =========================================================
+
+st.subheader(
+    "Foto de fachada"
+)
+
+
+foto_fachada = st.file_uploader(
+
+    "Sube la foto de fachada de la tienda",
+
+    type=[
+        "jpg",
+        "jpeg",
+        "png"
+    ],
+
+    key="foto_fachada"
+
+)
+
+
+if foto_fachada is not None:
+
+    st.image(
+
+        foto_fachada,
+
+        caption="Foto de fachada",
+
+        width=400
+
+    )
+
+
+# =========================================================
+# FILTRAR TIENDA
+# =========================================================
 
 datos_tienda = df[
-    df[col_tienda].astype(str).str.strip() == tienda
+
+    df[col_tienda]
+
+    .astype(str)
+
+    .str.strip()
+
+    == tienda_seleccionada
+
 ].copy()
+
 
 # =========================================================
 # FECHAS
 # =========================================================
-fecha_inicio = fecha_final = None
+
+fecha_inicio = None
+
+fecha_final = None
+
 dia_mas_encuestas = ""
+
 cantidad_dia_mas = 0
+
 dias_sin_encuestas = []
 
-if col_fecha:
-    datos_tienda[col_fecha] = pd.to_datetime(
-        datos_tienda[col_fecha], errors="coerce"
-    )
-    fechas = datos_tienda[col_fecha].dropna()
 
-    if len(fechas):
+if col_fecha is not None:
+
+    datos_tienda[col_fecha] = pd.to_datetime(
+
+        datos_tienda[col_fecha],
+
+        errors="coerce"
+
+    )
+
+    fechas = (
+
+        datos_tienda[col_fecha]
+
+        .dropna()
+
+    )
+
+
+    if len(fechas) > 0:
+
         fecha_inicio = fechas.min()
+
         fecha_final = fechas.max()
 
-        conteo = fechas.dt.date.value_counts().sort_index()
-        dia_mas_encuestas = str(conteo.idxmax())
-        cantidad_dia_mas = int(conteo.max())
 
-        todos = pd.date_range(
-            fecha_inicio.date(), fecha_final.date(), freq="D"
-        ).date
-        dias_sin_encuestas = [
-            d.strftime("%d/%m/%Y")
-            for d in todos if d not in conteo.index
-        ]
+        conteo_dias = (
 
-periodo = (
-    formato_fecha(fecha_inicio)
-    if fecha_inicio is not None and fecha_inicio.date() == fecha_final.date()
-    else f"{formato_fecha(fecha_inicio)} - {formato_fecha(fecha_final)}"
+            fechas.dt.date
+
+            .value_counts()
+
+            .sort_index()
+
+        )
+
+
+        if len(conteo_dias) > 0:
+
+            dia_mas_encuestas = (
+                conteo_dias.idxmax()
+            )
+
+            cantidad_dia_mas = int(
+
+                conteo_dias.max()
+
+            )
+
+
+            todos_los_dias = pd.date_range(
+
+                start=fecha_inicio.date(),
+
+                end=fecha_final.date(),
+
+                freq="D"
+
+            ).date
+
+
+            dias_sin_encuestas = [
+
+                dia.strftime("%d/%m/%Y")
+
+                for dia in todos_los_dias
+
+                if dia not in conteo_dias.index
+
+            ]
+
+
+# =========================================================
+# 3. INFORMACIÓN AUTOMÁTICA
+# =========================================================
+
+st.header(
+    "3. Información automática"
 )
 
-# =========================================================
-# AUTOMÁTICOS
-# =========================================================
-total = len(datos_tienda)
 
-edad_promedio = ""
-if col_edad:
-    edades = pd.to_numeric(datos_tienda[col_edad], errors="coerce").dropna()
-    if len(edades):
-        edad_promedio = round(edades.mean(), 1)
-
-hombres = mujeres = 0
-if col_genero:
-    g = datos_tienda[col_genero].astype(str).str.strip().str.lower()
-    hombres = int(g.str.contains("hombre", na=False).sum())
-    mujeres = int(g.str.contains("mujer", na=False).sum())
-
-estrato_tabla = tabla_frecuencia(datos_tienda, col_estrato)
-ocupacion_tabla = tabla_frecuencia(datos_tienda, col_ocupacion)
-
-estrato = str(estrato_tabla.iloc[0]["Respuesta"]) if not estrato_tabla.empty else ""
-estrato_pct = str(estrato_tabla.iloc[0]["%"]) if not estrato_tabla.empty else ""
-
-ocupacion = str(ocupacion_tabla.iloc[0]["Respuesta"]) if not ocupacion_tabla.empty else ""
-ocupacion_pct = str(ocupacion_tabla.iloc[0]["%"]) if not ocupacion_tabla.empty else ""
-
-trafico_promedio = calcular_trafico_promedio(datos_tienda, col_trafico)
-
-tablas = {
-    "motivo": tabla_frecuencia(datos_tienda, col_motivo),
-    "transporte": tabla_frecuencia(datos_tienda, col_transporte),
-    "origen": tabla_frecuencia(datos_tienda, col_origen),
-    "destino": tabla_frecuencia(datos_tienda, col_destino),
-    "alternativa": tabla_frecuencia(datos_tienda, col_alternativa),
-}
-
-# =========================================================
-# DATOS MANUALES
-# =========================================================
-st.header("3. Información manual")
-
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-    radio_100 = st.text_input("100 m", placeholder="Ej. 47")
-with c2:
-    radio_200 = st.text_input("200 m", placeholder="Ej. 48")
-with c3:
-    radio_300 = st.text_input("300 m", placeholder="Ej. 74")
-with c4:
-    radio_mas_300 = st.text_input("+300 m", placeholder="Ej. 67")
-
-percepcion_comentario = st.text_area(
-    "Comentario de percepción del servicio",
-    placeholder="Escribe el motivo/explicación de la percepción."
+total_encuestas = len(
+    datos_tienda
 )
 
-insight1 = st.text_area("Insight 1")
-insight2 = st.text_area("Insight 2")
-insight3 = st.text_area("Insight 3")
 
-st.caption("La imagen de radios, isócrona y registro fotográfico se cargan manualmente.")
+if (
 
-fachada = st.file_uploader("Foto fachada", type=["jpg", "jpeg", "png"], key="fachada")
-imagen_radio = st.file_uploader("Imagen del radio de influencia", type=["jpg", "jpeg", "png"], key="radio")
-imagen_isocrona = st.file_uploader("Imagen de la isócrona", type=["jpg", "jpeg", "png"], key="isocrona")
-fotos = st.file_uploader(
-    "Registro fotográfico (hasta 3 fotos)",
-    type=["jpg", "jpeg", "png"],
-    accept_multiple_files=True,
-    key="fotos"
-)
+    col_fecha is not None
 
-# =========================================================
-# RESUMEN
-# =========================================================
-st.header("4. Resumen automático")
+    and fecha_inicio is not None
 
-a, b, c, d = st.columns(4)
-a.metric("Encuestas", total)
-b.metric("Inicio", formato_fecha_hora(fecha_inicio))
-c.metric("Finalización", formato_fecha_hora(fecha_final))
-d.metric("Día con más encuestas", dia_mas_encuestas)
+):
+
+    if (
+        fecha_inicio.date()
+        == fecha_final.date()
+    ):
+
+        periodo = formato_fecha(
+            fecha_inicio
+        )
+
+    else:
+
+        periodo = (
+
+            f"{formato_fecha(fecha_inicio)} - "
+
+            f"{formato_fecha(fecha_final)}"
+
+        )
+
+else:
+
+    periodo = ""
+
+
+col1, col2, col3 = st.columns(3)
+
+
+with col1:
+
+    st.metric(
+
+        "Encuestas",
+
+        total_encuestas
+
+    )
+
+
+with col2:
+
+    st.metric(
+
+        "Inicio",
+
+        formato_fecha_hora(
+            fecha_inicio
+        )
+
+    )
+
+
+with col3:
+
+    st.metric(
+
+        "Finalización",
+
+        formato_fecha_hora(
+            fecha_final
+        )
+
+    )
+
+
+col4, col5, col6 = st.columns(3)
+
+
+with col4:
+
+    st.metric(
+
+        "Día con más encuestas",
+
+        str(
+            dia_mas_encuestas
+        )
+
+    )
+
+
+with col5:
+
+    st.metric(
+
+        "Cantidad ese día",
+
+        cantidad_dia_mas
+
+    )
+
+
+with col6:
+
+    st.write(
+        "**Periodo**"
+    )
+
+    st.write(
+        periodo
+    )
+
 
 if dias_sin_encuestas:
-    st.warning("Días sin encuestas: " + ", ".join(dias_sin_encuestas))
 
-if not trafico_promedio:
-    st.info(
-        "No encontré una columna identificable para calcular automáticamente "
-        "el tráfico promedio. El resto del reporte sí puede generarse."
+    st.warning(
+
+        "Días sin encuestas: "
+
+        + ", ".join(
+            dias_sin_encuestas
+        )
+
     )
+
+else:
+
+    st.success(
+
+        "No se encontraron días "
+        "sin encuestas."
+
+    )
+
 
 # =========================================================
-# GENERAR
+# 4. PERFIL DEL CLIENTE
 # =========================================================
-st.header("5. Generar reporte")
 
-if st.button("🟢 GENERAR REPORTE", type="primary"):
-    datos = {
-        "tienda": tienda,
-        "periodo": periodo,
-        "encuestas": total,
-        "fecha_inicio": formato_fecha(fecha_inicio),
-        "hora_inicio": pd.to_datetime(fecha_inicio).strftime("%H:%M") if fecha_inicio is not None else "",
-        "fecha_finalizacion": formato_fecha(fecha_final),
-        "hora_finalizacion": pd.to_datetime(fecha_final).strftime("%H:%M") if fecha_final is not None else "",
-        "dia_mas_encuestas": dia_mas_encuestas,
-        "dias_sin_encuestas": ", ".join(dias_sin_encuestas) if dias_sin_encuestas else "Ninguno",
-        "edad_promedio": edad_promedio,
-        "hombres": hombres,
-        "mujeres": mujeres,
-        "estrato": estrato,
-        "estrato_porcentaje": estrato_pct,
-        "ocupacion": ocupacion,
-        "ocupacion_porcentaje": ocupacion_pct,
-        "trafico_promedio": trafico_promedio,
-    }
+st.header(
+    "4. Perfil del cliente"
+)
 
-    manuales = {
-        "radio_100": radio_100,
-        "radio_200": radio_200,
-        "radio_300": radio_300,
-        "radio_mas_300": radio_mas_300,
-        "percepcion": percepcion_comentario,
-        "percepcion_comentario": percepcion_comentario,
-        "insight1": insight1,
-        "insight2": insight2,
-        "insight3": insight3,
-    }
 
-    imagenes = {
-        "fachada": fachada.getvalue() if fachada else None,
-        "radio": imagen_radio.getvalue() if imagen_radio else None,
-        "isocrona": imagen_isocrona.getvalue() if imagen_isocrona else None,
-        "fotos": [f.getvalue() for f in (fotos or [])],
-    }
+edad_promedio = ""
 
-    documento = crear_reporte(
-        archivo_plantilla.getvalue(),
-        datos,
-        tablas,
-        manuales,
-        imagenes
+
+if col_edad is not None:
+
+    edades = pd.to_numeric(
+
+        datos_tienda[col_edad],
+
+        errors="coerce"
+
     )
 
-    nombre = f"Reporte_EOD_{tienda.replace('/', '-')}.docx"
 
-    st.success("¡Reporte generado correctamente! 🎉")
-    st.download_button(
-        "📥 Descargar reporte EOD",
-        data=documento,
-        file_name=nombre,
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    if edades.notna().any():
+
+        edad_promedio = round(
+
+            edades.mean(),
+
+            1
+
+        )
+
+
+hombres = 0
+
+mujeres = 0
+
+
+if col_genero is not None:
+
+    genero = (
+
+        datos_tienda[col_genero]
+
+        .astype(str)
+
+        .str.strip()
+
+        .str.lower()
+
     )
+
+
+    hombres = int(
+
+        genero.str.contains(
+
+            "hombre",
+
+            na=False
+
+        ).sum()
+
+    )
+
+
+    mujeres = int(
+
+        genero.str.contains(
+
+            "mujer",
+
+            na=False
+
+        ).sum()
+
+    )
+
+
+estrato_tabla = tabla_frecuencia(
+
+    datos_tienda,
+
+    col_estrato
+
+)
+
+
+ocupacion_tabla = tabla_frecuencia(
+
+    datos_tienda,
+
+    col_ocupacion
+
+)
+
+
+p1, p2, p3, p4 = st.columns(4)
+
+
+with p1:
+
+    st.metric(
+
+        "Edad promedio",
+
+        f"{edad_promedio} años"
+
+        if edad_promedio != ""
+
+        else "N/D"
+
+    )
+
+
+with p2:
+
+    st.metric(
+
+        "Hombres",
+
+        hombres
+
+    )
+
+
+with p3:
+
+    st.metric(
+
+        "Mujeres",
+
+        mujeres
+
+    )
+
+
+with p4:
+
+    if not estrato_tabla.empty:
+
+        estrato_principal = (
+
+            estrato_tabla.iloc[0][
+                "Respuesta"
+            ]
+
+        )
+
+        estrato_porcentaje = (
+
+            estrato_tabla.iloc[0][
+                "%"
+            ]
+
+        )
+
+        st.metric(
+
+            "Estrato principal",
+
+            f"{estrato_principal} "
+            f"({estrato_porcentaje}%)"
+
+        )
+
+    else:
+
+        estrato_principal = "N/D"
+
+        estrato_porcentaje = 0
+
+        st.metric(
+
+            "Estrato principal",
+
+            "N/D"
+
+        )
+
+
+if not ocupacion_tabla.empty:
+
+    st.write(
+        "**Ocupación principal**"
+    )
+
+    st.dataframe(
+
+        ocupacion_tabla,
+
+        use_container_width=True,
+
+        hide_index=True
+
+    )
+
+
+# =========================================================
+# 5. INFORMACIÓN DEL ESTUDIO
+# =========================================================
+
+st.header(
+    "5. Información del estudio"
+)
+
+
+tablas = {
+
+    "ocupacion":
+        ocupacion_tabla,
+
+    "motivo":
+        tabla_frecuencia(
+            datos_tienda,
+            col_motivo
+        ),
+
+    "transporte":
+        tabla_frecuencia(
+            datos_tienda,
+            col_transporte
+        ),
+
+    "origen":
+        tabla_frecuencia(
+            datos_tienda,
+            col_origen
+        ),
+
+    "destino":
+        tabla_frecuencia(
+            datos_tienda,
+            col_destino
+        ),
+
+    "alternativa":
+        tabla_frecuencia(
+            datos_tienda,
+            col_alternativa
+        )
+
+}
+
+
+# =========================================================
+# MOSTRAR TABLAS EN STREAMLIT
+# =========================================================
+
+t1, t2 = st.columns(2)
+
+
+with t1:
+
+    st.subheader(
+        "Principal motivo de compra"
+    )
+
+    st.dataframe(
+
+        tablas["motivo"],
+
+        use_container_width=True,
+
+        hide_index=True
+
+    )
+
+
+with t2:
+
+    st.subheader(
+        "Medio de llegada"
+    )
+
+    st.dataframe(
+
+        tablas["transporte"],
+
+        use_container_width=True,
+
+        hide_index=True
+
+    )
+
+
+t3, t4 = st.columns(2)
+
+
+with t3:
+
+    st.subheader(
+        "De dónde viene"
+    )
+
+    st.dataframe(
+
+        tablas["origen"],
+
+        use_container_width=True,
+
+        hide_index=True
+
+    )
+
+
+with t4:
+
+    st.subheader(
+        "A dónde se dirige"
+    )
+
+    st.dataframe(
+
+        tablas["destino"],
+
+        use_container_width=True,
+
+        hide_index=True
+
+    )
+
+
+st.subheader(
+    "Alternativa de compra"
+)
+
+
+st.dataframe(
+
+    tablas["alternativa"],
+
+    use_container_width=True,
+
+    hide_index=True
+
+)
+
+
+# =========================================================
+# 6. INFORMACIÓN MANUAL
+# =========================================================
+
+st.header(
+    "6. Información manual"
+)
+
+
+st.info(
+
+    "Diligencia únicamente la información "
+    "que corresponde al análisis de la tienda."
+
+)
+
+
+percepcion = st.text_area(
+
+    "Percepción del servicio",
+
+    placeholder=(
+        "Escribe aquí la percepción "
+        "del servicio..."
+    )
+
+)
+
+
+radio = st.text_input(
+
+    "Radio de influencia",
+
+    placeholder=(
+
+        "Ejemplo: 100m: 47 | "
+        "200m: 48 | "
+        "300m: 74 | "
+        "+300m: 67"
+
+    )
+
+)
+
+
+# =========================================================
+# IMAGEN RADIO
+# =========================================================
+
+imagen_radio = st.file_uploader(
+
+    "Pantallazo del radio de influencia",
+
+    type=[
+        "jpg",
+        "jpeg",
+        "png"
+    ],
+
+    key="imagen_radio"
+
+)
+
+
+if imagen_radio is not None:
+
+    st.image(
+
+        imagen_radio,
+
+        caption="Radio de influencia",
+
+        width=500
+
+    )
+
+
+# =========================================================
+# IMAGEN ISÓCRONA
+# =========================================================
+
+imagen_isocrona = st.file_uploader(
+
+    "Pantallazo de la isócrona",
+
+    type=[
+        "jpg",
+        "jpeg",
+        "png"
+    ],
+
+    key="imagen_isocrona"
+
+)
+
+
+if imagen_isocrona is not None:
+
+    st.image(
+
+        imagen_isocrona,
+
+        caption="Isócrona",
+
+        width=500
+
+    )
+
+
+# =========================================================
+# INSIGHTS
+# =========================================================
+
+st.subheader(
+    "Insights clave"
+)
+
+
+insight1 = st.text_area(
+
+    "Insight 1",
+
+    placeholder=(
+        "Escribe el primer insight..."
+    )
+
+)
+
+
+insight2 = st.text_area(
+
+    "Insight 2",
+
+    placeholder=(
+        "Escribe el segundo insight..."
+    )
+
+)
+
+
+insight3 = st.text_area(
+
+    "Insight 3",
+
+    placeholder=(
+        "Escribe el tercer insight..."
+    )
+
+)
+
+
+# =========================================================
+# 7. REGISTRO FOTOGRÁFICO
+# =========================================================
+
+st.header(
+    "7. Registro fotográfico"
+)
+
+
+fotos = st.file_uploader(
+
+    "Sube las fotografías de la tienda "
+    "(máximo 4 para esta plantilla)",
+
+    type=[
+        "jpg",
+        "jpeg",
+        "png"
+    ],
+
+    accept_multiple_files=True,
+
+    key="fotos"
+
+)
+
+
+if len(fotos) > 4:
+
+    st.warning(
+
+        "La plantilla tiene 4 espacios "
+        "para fotografías. Solo se utilizarán "
+        "las primeras 4."
+
+    )
+
+    fotos = fotos[:4]
+
+
+# =========================================================
+# PREPARAR DATOS
+# =========================================================
+
+datos = {
+
+    "tienda":
+        tienda_seleccionada,
+
+    "encuestas":
+        total_encuestas,
+
+    "periodo":
+        periodo,
+
+    "inicio":
+        formato_fecha_hora(
+            fecha_inicio
+        ),
+
+    "finalizacion":
+        formato_fecha_hora(
+            fecha_final
+        ),
+
+    "dia_mas_encuestas":
+        str(
+            dia_mas_encuestas
+        ),
+
+    "cantidad_dia_mas":
+        cantidad_dia_mas,
+
+    "edad_promedio":
+        edad_promedio,
+
+    "hombres":
+        hombres,
+
+    "mujeres":
+        mujeres,
+
+    "estrato":
+        estrato_principal,
+
+    "estrato_porcentaje":
+        estrato_porcentaje
+
+}
+
+
+manuales = {
+
+    "percepcion":
+        percepcion,
+
+    "radio":
+        radio,
+
+    "foto_fachada":
+        foto_fachada,
+
+    "imagen_radio":
+        imagen_radio,
+
+    "imagen_isocrona":
+        imagen_isocrona,
+
+    "insight1":
+        insight1,
+
+    "insight2":
+        insight2,
+
+    "insight3":
+        insight3,
+
+    "fotos":
+        fotos
+
+}
+
+
+# =========================================================
+# 8. GENERAR REPORTE
+# =========================================================
+
+st.header(
+    "8. Generar reporte"
+)
+
+
+if st.button(
+
+    "🟢 GENERAR REPORTE",
+
+    type="primary"
+
+):
+
+    try:
+
+        documento = crear_word(
+
+            datos,
+
+            manuales,
+
+            tablas
+
+        )
+
+
+        nombre_archivo = (
+
+            f"Reporte_EOD_"
+
+            f"{tienda_seleccionada}.docx"
+
+        )
+
+
+        st.success(
+
+            "¡Reporte generado correctamente! 🎉"
+
+        )
+
+
+        st.download_button(
+
+            label="📥 Descargar reporte Word",
+
+            data=documento,
+
+            file_name=nombre_archivo,
+
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            )
+
+        )
+
+
+    except Exception as e:
+
+        st.error(
+
+            f"No se pudo generar el reporte: {e}"
+
+        )
