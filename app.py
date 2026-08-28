@@ -16,7 +16,10 @@ st.set_page_config(
 )
 
 st.title("🟢 Generador de Reporte EOD OXXO")
-st.write("Carga el archivo de encuestas y selecciona la tienda para generar la información del estudio.")
+st.write(
+    "Carga el archivo de encuestas y selecciona la tienda "
+    "para generar la información del estudio."
+)
 
 # =========================================================
 # FUNCIONES
@@ -39,10 +42,12 @@ def buscar_columna(df, nombres):
 
     return None
 
+
 def porcentaje(cantidad, total):
     if total == 0:
         return 0
     return round((cantidad / total) * 100)
+
 
 def tabla_frecuencia(df, columna):
     if columna is None or columna not in df.columns:
@@ -69,11 +74,13 @@ def tabla_frecuencia(df, columna):
 
     return tabla
 
+
 def formato_fecha(fecha):
     if pd.isna(fecha):
         return ""
 
     return pd.to_datetime(fecha).strftime("%d/%m/%Y")
+
 
 def formato_fecha_hora(fecha):
     if pd.isna(fecha):
@@ -81,14 +88,20 @@ def formato_fecha_hora(fecha):
 
     return pd.to_datetime(fecha).strftime("%d/%m/%Y %H:%M")
 
+
 def crear_word(datos, manuales, tablas):
     """
-    Genera un Word básico con la información del estudio.
-    Posteriormente podremos conectarlo directamente con
-    la plantilla visual definitiva.
+    Genera el Word con la información del estudio.
+    Incluye imágenes cargadas manualmente para:
+    - Radio de influencia
+    - Isócrona
     """
 
     doc = Document()
+
+    # =====================================================
+    # ENCABEZADO
+    # =====================================================
 
     doc.add_heading("REPORTE EOD", level=1)
 
@@ -124,7 +137,14 @@ def crear_word(datos, manuales, tablas):
         f"Cantidad ese día: {datos['cantidad_dia_mas']}"
     )
 
-    doc.add_heading("PERFIL DEL CLIENTE", level=2)
+    # =====================================================
+    # PERFIL DEL CLIENTE
+    # =====================================================
+
+    doc.add_heading(
+        "PERFIL DEL CLIENTE",
+        level=2
+    )
 
     doc.add_paragraph(
         f"Edad promedio: {datos['edad_promedio']} años"
@@ -146,12 +166,17 @@ def crear_word(datos, manuales, tablas):
         f"Ocupación principal: {datos['ocupacion']}"
     )
 
+    # =====================================================
+    # PRINCIPAL MOTIVO DE COMPRA
+    # =====================================================
+
     doc.add_heading(
         "PRINCIPAL MOTIVO DE COMPRA",
         level=2
     )
 
     if not tablas["motivo"].empty:
+
         tabla = doc.add_table(
             rows=1,
             cols=3
@@ -164,10 +189,16 @@ def crear_word(datos, manuales, tablas):
         tabla.rows[0].cells[2].text = "%"
 
         for _, fila in tablas["motivo"].iterrows():
+
             celdas = tabla.add_row().cells
+
             celdas[0].text = str(fila["Respuesta"])
             celdas[1].text = str(fila["Cantidad"])
             celdas[2].text = f"{fila['%']}%"
+
+    # =====================================================
+    # MEDIO DE LLEGADA
+    # =====================================================
 
     doc.add_heading(
         "MEDIO DE LLEGADA",
@@ -175,9 +206,13 @@ def crear_word(datos, manuales, tablas):
     )
 
     if not tablas["transporte"].empty:
+
         for _, fila in tablas["transporte"].iterrows():
+
             doc.add_paragraph(
-                f"{fila['Respuesta']}: {fila['Cantidad']} ({fila['%']}%)"
+                f"{fila['Respuesta']}: "
+                f"{fila['Cantidad']} "
+                f"({fila['%']}%)"
             )
 
     # =====================================================
@@ -203,20 +238,53 @@ def crear_word(datos, manuales, tablas):
     )
 
     if not tablas["origen"].empty:
-        doc.add_paragraph("De dónde viene:")
+
+        doc.add_paragraph(
+            "De dónde viene:"
+        )
 
         for _, fila in tablas["origen"].iterrows():
+
             doc.add_paragraph(
-                f"{fila['Respuesta']}: {fila['Cantidad']} ({fila['%']}%)"
+                f"{fila['Respuesta']}: "
+                f"{fila['Cantidad']} "
+                f"({fila['%']}%)"
             )
 
     if not tablas["destino"].empty:
-        doc.add_paragraph("A dónde se dirige:")
+
+        doc.add_paragraph(
+            "A dónde se dirige:"
+        )
 
         for _, fila in tablas["destino"].iterrows():
+
             doc.add_paragraph(
-                f"{fila['Respuesta']}: {fila['Cantidad']} ({fila['%']}%)"
+                f"{fila['Respuesta']}: "
+                f"{fila['Cantidad']} "
+                f"({fila['%']}%)"
             )
+
+    # =====================================================
+    # RADIO DE INFLUENCIA
+    # =====================================================
+
+    doc.add_heading(
+        "RADIO DE INFLUENCIA",
+        level=2
+    )
+
+    doc.add_paragraph(
+        manuales["radio"]
+    )
+
+    # Imagen del radio
+    if manuales["imagen_radio"]:
+
+        doc.add_picture(
+            manuales["imagen_radio"],
+            width=Inches(6)
+        )
 
     # =====================================================
     # ALTERNATIVA DE COMPRA
@@ -249,7 +317,23 @@ def crear_word(datos, manuales, tablas):
             celdas[2].text = f"{fila['%']}%"
 
     # =====================================================
-    # DATOS MANUALES
+    # ISÓCRONA
+    # =====================================================
+
+    doc.add_heading(
+        "ISÓCRONA DE INFLUENCIA",
+        level=2
+    )
+
+    if manuales["imagen_isocrona"]:
+
+        doc.add_picture(
+            manuales["imagen_isocrona"],
+            width=Inches(6)
+        )
+
+    # =====================================================
+    # INSIGHTS CLAVE
     # =====================================================
 
     doc.add_heading(
@@ -269,41 +353,6 @@ def crear_word(datos, manuales, tablas):
         f"3. {manuales['insight3']}"
     )
 
-    doc.add_heading(
-        "INFORMACIÓN MANUAL",
-        level=2
-    )
-
-    doc.add_paragraph(
-        f"Radio de influencia: {manuales['radio']}"
-    )
-
-    doc.add_paragraph(
-        f"¿Le hizo influencia?: {manuales['influencia']}"
-    )
-
-    doc.add_paragraph(
-        f"Observaciones: {manuales['observaciones']}"
-    )
-
-    # =====================================================
-    # FOTOGRAFÍAS
-    # =====================================================
-
-    if manuales["fotos"]:
-
-        doc.add_heading(
-            "REGISTRO FOTOGRÁFICO",
-            level=2
-        )
-
-        for foto in manuales["fotos"]:
-
-            doc.add_picture(
-                foto,
-                width=Inches(5)
-            )
-
     buffer = BytesIO()
 
     doc.save(buffer)
@@ -311,6 +360,7 @@ def crear_word(datos, manuales, tablas):
     buffer.seek(0)
 
     return buffer
+
 
 # =========================================================
 # CARGAR ARCHIVO
@@ -330,6 +380,7 @@ if archivo is None:
     )
 
     st.stop()
+
 
 # =========================================================
 # LEER ARCHIVO
@@ -351,14 +402,17 @@ except:
         encoding="latin-1"
     )
 
+
 df.columns = [
     str(c).strip()
     for c in df.columns
 ]
 
+
 st.success(
     f"Archivo cargado correctamente: {len(df)} encuestas."
 )
+
 
 # =========================================================
 # IDENTIFICAR COLUMNAS
@@ -451,6 +505,7 @@ col_frecuencia = buscar_columna(
     ]
 )
 
+
 # =========================================================
 # VALIDACIÓN
 # =========================================================
@@ -471,6 +526,7 @@ if col_tienda is None:
 
     st.stop()
 
+
 # =========================================================
 # SELECCIONAR TIENDA
 # =========================================================
@@ -487,10 +543,12 @@ tiendas = (
 
 tiendas = sorted(tiendas)
 
+
 tienda_seleccionada = st.selectbox(
     "Selecciona el CR / tienda",
     tiendas
 )
+
 
 # =========================================================
 # FILTRAR
@@ -500,8 +558,10 @@ datos_tienda = df[
     df[col_tienda]
     .astype(str)
     .str.strip()
-    == tienda_seleccionada
+    ==
+    tienda_seleccionada
 ].copy()
+
 
 # =========================================================
 # FECHAS
@@ -512,6 +572,7 @@ fecha_final = None
 dia_mas_encuestas = ""
 cantidad_dia_mas = 0
 dias_sin_encuestas = []
+
 
 if col_fecha is not None:
 
@@ -539,6 +600,7 @@ if col_fecha is not None:
         if len(conteo_dias) > 0:
 
             dia_mas_encuestas = conteo_dias.idxmax()
+
             cantidad_dia_mas = int(
                 conteo_dias.max()
             )
@@ -550,10 +612,15 @@ if col_fecha is not None:
             ).date
 
             dias_sin_encuestas = [
+
                 dia.strftime("%d/%m/%Y")
+
                 for dia in todos_los_dias
+
                 if dia not in conteo_dias.index
+
             ]
+
 
 # =========================================================
 # INFORMACIÓN AUTOMÁTICA
@@ -563,11 +630,17 @@ st.header("3. Información automática")
 
 total_encuestas = len(datos_tienda)
 
-if col_fecha is not None and fecha_inicio is not None:
+
+if (
+    col_fecha is not None
+    and fecha_inicio is not None
+):
 
     if fecha_inicio.date() == fecha_final.date():
 
-        periodo = formato_fecha(fecha_inicio)
+        periodo = formato_fecha(
+            fecha_inicio
+        )
 
     else:
 
@@ -580,7 +653,9 @@ else:
 
     periodo = ""
 
+
 col1, col2, col3 = st.columns(3)
+
 
 with col1:
 
@@ -589,21 +664,29 @@ with col1:
         total_encuestas
     )
 
+
 with col2:
 
     st.metric(
         "Inicio",
-        formato_fecha_hora(fecha_inicio)
+        formato_fecha_hora(
+            fecha_inicio
+        )
     )
+
 
 with col3:
 
     st.metric(
         "Finalización",
-        formato_fecha_hora(fecha_final)
+        formato_fecha_hora(
+            fecha_final
+        )
     )
 
+
 col4, col5, col6 = st.columns(3)
+
 
 with col4:
 
@@ -612,6 +695,7 @@ with col4:
         str(dia_mas_encuestas)
     )
 
+
 with col5:
 
     st.metric(
@@ -619,16 +703,22 @@ with col5:
         cantidad_dia_mas
     )
 
+
 with col6:
 
     st.write("**Periodo**")
-    st.write(periodo)
+
+    st.write(
+        periodo
+    )
+
 
 if dias_sin_encuestas:
 
     st.warning(
         "Días sin encuestas: "
-        + ", ".join(dias_sin_encuestas)
+        +
+        ", ".join(dias_sin_encuestas)
     )
 
 else:
@@ -637,6 +727,7 @@ else:
         "No se encontraron días sin encuestas."
     )
 
+
 # =========================================================
 # PERFIL DEL CLIENTE
 # =========================================================
@@ -644,6 +735,7 @@ else:
 st.header("4. Perfil del cliente")
 
 edad_promedio = ""
+
 
 if col_edad is not None:
 
@@ -659,8 +751,10 @@ if col_edad is not None:
             1
         )
 
+
 hombres = 0
 mujeres = 0
+
 
 if col_genero is not None:
 
@@ -685,6 +779,7 @@ if col_genero is not None:
         ).sum()
     )
 
+
 estrato_tabla = tabla_frecuencia(
     datos_tienda,
     col_estrato
@@ -695,7 +790,9 @@ ocupacion_tabla = tabla_frecuencia(
     col_ocupacion
 )
 
+
 p1, p2, p3, p4 = st.columns(4)
+
 
 with p1:
 
@@ -706,6 +803,7 @@ with p1:
         else "N/D"
     )
 
+
 with p2:
 
     st.metric(
@@ -713,12 +811,14 @@ with p2:
         hombres
     )
 
+
 with p3:
 
     st.metric(
         "Mujeres",
         mujeres
     )
+
 
 with p4:
 
@@ -734,7 +834,8 @@ with p4:
 
         st.metric(
             "Estrato principal",
-            f"{estrato_principal} ({estrato_porcentaje}%)"
+            f"{estrato_principal} "
+            f"({estrato_porcentaje}%)"
         )
 
     else:
@@ -744,9 +845,12 @@ with p4:
             "N/D"
         )
 
+
 if not ocupacion_tabla.empty:
 
-    st.write("**Ocupación principal**")
+    st.write(
+        "**Ocupación principal**"
+    )
 
     st.dataframe(
         ocupacion_tabla,
@@ -754,41 +858,53 @@ if not ocupacion_tabla.empty:
         hide_index=True
     )
 
+
 # =========================================================
 # TABLAS
 # =========================================================
 
-st.header("5. Información del estudio")
+st.header(
+    "5. Información del estudio"
+)
+
 
 tablas = {
 
-    "motivo": tabla_frecuencia(
-        datos_tienda,
-        col_motivo
-    ),
+    "motivo":
+        tabla_frecuencia(
+            datos_tienda,
+            col_motivo
+        ),
 
-    "transporte": tabla_frecuencia(
-        datos_tienda,
-        col_transporte
-    ),
+    "transporte":
+        tabla_frecuencia(
+            datos_tienda,
+            col_transporte
+        ),
 
-    "origen": tabla_frecuencia(
-        datos_tienda,
-        col_origen
-    ),
+    "origen":
+        tabla_frecuencia(
+            datos_tienda,
+            col_origen
+        ),
 
-    "destino": tabla_frecuencia(
-        datos_tienda,
-        col_destino
-    ),
+    "destino":
+        tabla_frecuencia(
+            datos_tienda,
+            col_destino
+        ),
 
-    "alternativa": tabla_frecuencia(
-        datos_tienda,
-        col_alternativa
-    )
+    "alternativa":
+        tabla_frecuencia(
+            datos_tienda,
+            col_alternativa
+        )
+
 }
 
+
 t1, t2 = st.columns(2)
+
 
 with t1:
 
@@ -802,6 +918,7 @@ with t1:
         hide_index=True
     )
 
+
 with t2:
 
     st.subheader(
@@ -814,7 +931,9 @@ with t2:
         hide_index=True
     )
 
+
 t3, t4 = st.columns(2)
+
 
 with t3:
 
@@ -828,6 +947,7 @@ with t3:
         hide_index=True
     )
 
+
 with t4:
 
     st.subheader(
@@ -840,6 +960,7 @@ with t4:
         hide_index=True
     )
 
+
 st.subheader(
     "Alternativa de compra"
 )
@@ -850,51 +971,96 @@ st.dataframe(
     hide_index=True
 )
 
+
 # =========================================================
 # INFORMACIÓN MANUAL
 # =========================================================
 
-st.header("6. Información manual")
+st.header(
+    "6. Información manual"
+)
 
 st.info(
-    "Esta información la diligencias tú porque forma parte del análisis."
+    "Esta información la diligencias tú "
+    "porque forma parte del análisis."
 )
+
 
 percepcion = st.text_area(
     "Percepción del servicio",
-    placeholder="Escribe aquí la percepción del servicio..."
+    placeholder=(
+        "Escribe aquí la percepción "
+        "del servicio..."
+    )
 )
+
 
 radio = st.text_input(
     "Radio de influencia",
-    placeholder="Ejemplo: 100m: 47 | 200m: 48 | 300m: 74 | +300m: 67"
+    placeholder=(
+        "Ejemplo: "
+        "100m: 47 | "
+        "200m: 48 | "
+        "300m: 74 | "
+        "+300m: 67"
+    )
 )
 
-influencia = st.text_area(
-    "¿Le hizo influencia?",
-    placeholder="Escribe aquí el análisis de influencia..."
+
+# =========================================================
+# IMAGEN DEL RADIO
+# =========================================================
+
+imagen_radio = st.file_uploader(
+    "Sube el pantallazo del radio de influencia",
+    type=["jpg", "jpeg", "png"],
+    key="imagen_radio"
 )
 
-observaciones = st.text_area(
-    "Observaciones / información adicional"
+
+# =========================================================
+# IMAGEN DE ISÓCRONA
+# =========================================================
+
+st.subheader(
+    "Isócrona de influencia"
 )
 
-st.subheader("Insights clave")
+imagen_isocrona = st.file_uploader(
+    "Sube el pantallazo de la isócrona",
+    type=["jpg", "jpeg", "png"],
+    key="imagen_isocrona"
+)
+
+
+st.subheader(
+    "Insights clave"
+)
+
 
 insight1 = st.text_area(
     "Insight 1",
-    placeholder="Escribe el primer insight..."
+    placeholder=(
+        "Escribe el primer insight..."
+    )
 )
+
 
 insight2 = st.text_area(
     "Insight 2",
-    placeholder="Escribe el segundo insight..."
+    placeholder=(
+        "Escribe el segundo insight..."
+    )
 )
+
 
 insight3 = st.text_area(
     "Insight 3",
-    placeholder="Escribe el tercer insight..."
+    placeholder=(
+        "Escribe el tercer insight..."
+    )
 )
+
 
 # =========================================================
 # FOTOGRAFÍAS
@@ -904,11 +1070,13 @@ st.subheader(
     "Registro fotográfico"
 )
 
+
 fotos = st.file_uploader(
     "Sube las fotografías de la tienda",
     type=["jpg", "jpeg", "png"],
     accept_multiple_files=True
 )
+
 
 # =========================================================
 # PREPARAR DATOS
@@ -916,19 +1084,24 @@ fotos = st.file_uploader(
 
 datos = {
 
-    "tienda": tienda_seleccionada,
+    "tienda":
+        tienda_seleccionada,
 
-    "encuestas": total_encuestas,
+    "encuestas":
+        total_encuestas,
 
-    "periodo": periodo,
+    "periodo":
+        periodo,
 
-    "inicio": formato_fecha_hora(
-        fecha_inicio
-    ),
+    "inicio":
+        formato_fecha_hora(
+            fecha_inicio
+        ),
 
-    "finalizacion": formato_fecha_hora(
-        fecha_final
-    ),
+    "finalizacion":
+        formato_fecha_hora(
+            fecha_final
+        ),
 
     "dia_mas_encuestas":
         str(dia_mas_encuestas),
@@ -958,7 +1131,9 @@ datos = {
             if not ocupacion_tabla.empty
             else "N/D"
         )
+
 }
+
 
 manuales = {
 
@@ -968,11 +1143,11 @@ manuales = {
     "radio":
         radio,
 
-    "influencia":
-        influencia,
+    "imagen_radio":
+        imagen_radio,
 
-    "observaciones":
-        observaciones,
+    "imagen_isocrona":
+        imagen_isocrona,
 
     "insight1":
         insight1,
@@ -985,13 +1160,18 @@ manuales = {
 
     "fotos":
         fotos
+
 }
+
 
 # =========================================================
 # GENERAR REPORTE
 # =========================================================
 
-st.header("7. Generar reporte")
+st.header(
+    "7. Generar reporte"
+)
+
 
 if st.button(
     "🟢 GENERAR REPORTE",
@@ -1005,7 +1185,8 @@ if st.button(
     )
 
     nombre_archivo = (
-        f"Reporte_EOD_{tienda_seleccionada}.docx"
+        f"Reporte_EOD_"
+        f"{tienda_seleccionada}.docx"
     )
 
     st.success(
