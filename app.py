@@ -1,8 +1,13 @@
 import streamlit as st
 import pandas as pd
-import re
 from io import BytesIO
-from zipfile import ZipFile, ZIP_DEFLATED
+from datetime import datetime
+from docx import Document
+from docx.shared import Inches
+
+# =========================================================
+# CONFIGURACIÓN
+# =========================================================
 
 st.set_page_config(
     page_title="Generador EOD OXXO",
@@ -11,239 +16,468 @@ st.set_page_config(
 )
 
 st.title("🟢 Generador de Reporte EOD OXXO")
-st.write("Carga el CSV y la plantilla Word para generar el informe.")
+st.write("Carga el archivo de encuestas y selecciona la tienda para generar la información del estudio.")
 
 # =========================================================
 # FUNCIONES
 # =========================================================
 
-def normalizar(texto):
-    texto = str(texto).lower().strip()
-    reemplazos = {
-        "á": "a", "é": "e", "í": "i",
-        "ó": "o", "ú": "u", "ñ": "n"
-    }
-    for a, b in reemplazos.items():
-        texto = texto.replace(a, b)
-    return re.sub(r"[^a-z0-9]", "", texto)
-
-
 def buscar_columna(df, nombres):
-    columnas = {normalizar(c): c for c in df.columns}
+    """
+    Busca una columna aunque tenga diferencias de mayúsculas,
+    espacios o caracteres.
+    """
+    columnas = {
+        str(c).strip().lower().replace(" ", "").replace("_", ""): c
+        for c in df.columns
+    }
+
     for nombre in nombres:
-        clave = normalizar(nombre)
+        clave = nombre.strip().lower().replace(" ", "").replace("_", "")
         if clave in columnas:
             return columnas[clave]
+
     return None
 
+def porcentaje(cantidad, total):
+    if total == 0:
+        return 0
+    return round((cantidad / total) * 100)
 
-def buscar_parcial(df, palabras):
-    for columna in df.columns:
-        texto = normalizar(columna)
-        if all(normalizar(p) in texto for p in palabras):
-            return columna
-    return None
+def tabla_frecuencia(df, columna):
+    if columna is None or columna not in df.columns:
+        return pd.DataFrame()
 
+    datos = (
+        df[columna]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
 
-def frecuencia(df, columna):
-    if not columna:
-        return pd.DataFrame(columns=["Respuesta", "Cantidad", "%"])
+    datos = datos[datos != ""]
 
-    serie = df[columna].dropna().astype(str).str.strip()
-    serie = serie[serie != ""]
+    if len(datos) == 0:
+        return pd.DataFrame()
 
-    if serie.empty:
-        return pd.DataFrame(columns=["Respuesta", "Cantidad", "%"])
-
-    tabla = serie.value_counts().reset_index()
+    tabla = datos.value_counts().reset_index()
     tabla.columns = ["Respuesta", "Cantidad"]
-    tabla["%"] = (tabla["Cantidad"] / len(serie) * 100).round().astype(int)
+
+    tabla["%"] = tabla["Cantidad"].apply(
+        lambda x: porcentaje(x, len(datos))
+    )
+
     return tabla
 
+def formato_fecha(fecha):
+    if pd.isna(fecha):
+        return ""
 
-def convertir_numero(valor):
-    if pd.isna(valor):
-        return None
+    return pd.to_datetime(fecha).strftime("%d/%m/%Y")
 
-    numeros = re.findall(r"\d+(?:[.,]\d+)?", str(valor))
-    if not numeros:
-        return None
+def formato_fecha_hora(fecha):
+    if pd.isna(fecha):
+        return ""
 
-    try:
-        return float(numeros[0].replace(",", "."))
-    except:
-        return None
+    return pd.to_datetime(fecha).strftime("%d/%m/%Y %H:%M")
 
+def crear_word(datos, manuales, tablas):
+    """
+    Genera un Word básico con la información del estudio.
+    Posteriormente podremos conectarlo directamente con
+    la plantilla visual definitiva.
+    """
 
-def encontrar_trafico(df):
-    prioridades = [
-        ["flujo", "personas"],
-        ["flujo"],
-        ["trafico"],
-        ["tráfico"],
-        ["personas"],
-        ["conteo"],
-        ["aforo"],
-    ]
+    doc = Document()
 
-    for grupo in prioridades:
-        col = buscar_parcial(df, grupo)
-        if col:
-            return col
+    doc.add_heading("REPORTE EOD", level=1)
 
-    return None
+    doc.add_paragraph(
+        f"Tienda: {datos['tienda']}"
+    )
 
+    doc.add_paragraph(
+        "Estudio Origen – Destino"
+    )
 
-def calcular_trafico(df, columna):
-    if not columna:
-        return None
+    doc.add_paragraph(
+        f"Periodo: {datos['periodo']}"
+    )
 
-    valores = df[columna].apply(convertir_numero).dropna()
+    doc.add_paragraph(
+        f"N. de encuestas: {datos['encuestas']}"
+    )
 
-    if valores.empty:
-        return None
+    doc.add_paragraph(
+        f"Inicio: {datos['inicio']}"
+    )
 
-    return round(valores.mean(), 1)
+    doc.add_paragraph(
+        f"Finalización: {datos['finalizacion']}"
+    )
 
+    doc.add_paragraph(
+        f"Día con más encuestas: {datos['dia_mas_encuestas']}"
+    )
 
-def reemplazar_xml(data, reemplazos):
-    texto = data.decode("utf-8")
-    for marcador, valor in reemplazos.items():
-        texto = texto.replace(marcador, str(valor))
-    return texto.encode("utf-8")
+    doc.add_paragraph(
+        f"Cantidad ese día: {datos['cantidad_dia_mas']}"
+    )
 
+    doc.add_heading("PERFIL DEL CLIENTE", level=2)
 
-def generar_word(plantilla_bytes, reemplazos):
-    entrada = BytesIO(plantilla_bytes)
-    salida = BytesIO()
+    doc.add_paragraph(
+        f"Edad promedio: {datos['edad_promedio']} años"
+    )
 
-    with ZipFile(entrada, "r") as zin, ZipFile(
-        salida, "w", ZIP_DEFLATED
-    ) as zout:
+    doc.add_paragraph(
+        f"Hombre: {datos['hombres']}"
+    )
 
-        for item in zin.infolist():
-            data = zin.read(item.filename)
+    doc.add_paragraph(
+        f"Mujer: {datos['mujeres']}"
+    )
 
-            if item.filename.endswith(".xml"):
-                try:
-                    data = reemplazar_xml(data, reemplazos)
-                except Exception:
-                    pass
+    doc.add_paragraph(
+        f"Estrato principal: {datos['estrato']}"
+    )
 
-            zout.writestr(item, data)
+    doc.add_paragraph(
+        f"Ocupación principal: {datos['ocupacion']}"
+    )
 
-    salida.seek(0)
-    return salida
+    doc.add_heading(
+        "PRINCIPAL MOTIVO DE COMPRA",
+        level=2
+    )
 
+    if not tablas["motivo"].empty:
+        tabla = doc.add_table(
+            rows=1,
+            cols=3
+        )
+
+        tabla.style = "Table Grid"
+
+        tabla.rows[0].cells[0].text = "Motivo"
+        tabla.rows[0].cells[1].text = "Cantidad"
+        tabla.rows[0].cells[2].text = "%"
+
+        for _, fila in tablas["motivo"].iterrows():
+            celdas = tabla.add_row().cells
+            celdas[0].text = str(fila["Respuesta"])
+            celdas[1].text = str(fila["Cantidad"])
+            celdas[2].text = f"{fila['%']}%"
+
+    doc.add_heading(
+        "MEDIO DE LLEGADA",
+        level=2
+    )
+
+    if not tablas["transporte"].empty:
+        for _, fila in tablas["transporte"].iterrows():
+            doc.add_paragraph(
+                f"{fila['Respuesta']}: {fila['Cantidad']} ({fila['%']}%)"
+            )
+
+    # =====================================================
+    # PERCEPCIÓN MANUAL
+    # =====================================================
+
+    doc.add_heading(
+        "PERCEPCIÓN DEL SERVICIO",
+        level=2
+    )
+
+    doc.add_paragraph(
+        manuales["percepcion"]
+    )
+
+    # =====================================================
+    # ORIGEN - DESTINO
+    # =====================================================
+
+    doc.add_heading(
+        "ORIGEN – DESTINO",
+        level=2
+    )
+
+    if not tablas["origen"].empty:
+        doc.add_paragraph("De dónde viene:")
+
+        for _, fila in tablas["origen"].iterrows():
+            doc.add_paragraph(
+                f"{fila['Respuesta']}: {fila['Cantidad']} ({fila['%']}%)"
+            )
+
+    if not tablas["destino"].empty:
+        doc.add_paragraph("A dónde se dirige:")
+
+        for _, fila in tablas["destino"].iterrows():
+            doc.add_paragraph(
+                f"{fila['Respuesta']}: {fila['Cantidad']} ({fila['%']}%)"
+            )
+
+    # =====================================================
+    # ALTERNATIVA DE COMPRA
+    # =====================================================
+
+    doc.add_heading(
+        "ALTERNATIVA DE COMPRA",
+        level=2
+    )
+
+    if not tablas["alternativa"].empty:
+
+        tabla = doc.add_table(
+            rows=1,
+            cols=3
+        )
+
+        tabla.style = "Table Grid"
+
+        tabla.rows[0].cells[0].text = "Competidor"
+        tabla.rows[0].cells[1].text = "Respuestas"
+        tabla.rows[0].cells[2].text = "%"
+
+        for _, fila in tablas["alternativa"].iterrows():
+
+            celdas = tabla.add_row().cells
+
+            celdas[0].text = str(fila["Respuesta"])
+            celdas[1].text = str(fila["Cantidad"])
+            celdas[2].text = f"{fila['%']}%"
+
+    # =====================================================
+    # DATOS MANUALES
+    # =====================================================
+
+    doc.add_heading(
+        "INSIGHTS CLAVE",
+        level=2
+    )
+
+    doc.add_paragraph(
+        f"1. {manuales['insight1']}"
+    )
+
+    doc.add_paragraph(
+        f"2. {manuales['insight2']}"
+    )
+
+    doc.add_paragraph(
+        f"3. {manuales['insight3']}"
+    )
+
+    doc.add_heading(
+        "INFORMACIÓN MANUAL",
+        level=2
+    )
+
+    doc.add_paragraph(
+        f"Radio de influencia: {manuales['radio']}"
+    )
+
+    doc.add_paragraph(
+        f"¿Le hizo influencia?: {manuales['influencia']}"
+    )
+
+    doc.add_paragraph(
+        f"Observaciones: {manuales['observaciones']}"
+    )
+
+    # =====================================================
+    # FOTOGRAFÍAS
+    # =====================================================
+
+    if manuales["fotos"]:
+
+        doc.add_heading(
+            "REGISTRO FOTOGRÁFICO",
+            level=2
+        )
+
+        for foto in manuales["fotos"]:
+
+            doc.add_picture(
+                foto,
+                width=Inches(5)
+            )
+
+    buffer = BytesIO()
+
+    doc.save(buffer)
+
+    buffer.seek(0)
+
+    return buffer
 
 # =========================================================
-# ARCHIVOS
+# CARGAR ARCHIVO
 # =========================================================
 
-st.header("1. Archivos")
+st.header("1. Cargar archivo de encuestas")
 
-csv_file = st.file_uploader(
-    "Archivo CSV de encuestas",
+archivo = st.file_uploader(
+    "Selecciona el archivo CSV",
     type=["csv"]
 )
 
-plantilla_file = st.file_uploader(
-    "Plantilla EOD OXXO",
-    type=["docx"]
-)
+if archivo is None:
 
-if csv_file is None or plantilla_file is None:
-    st.info("Carga ambos archivos para continuar.")
+    st.info(
+        "Primero carga el archivo EOD_OXXO."
+    )
+
     st.stop()
 
-
 # =========================================================
-# LEER CSV
+# LEER ARCHIVO
 # =========================================================
 
 try:
-    csv_file.seek(0)
-    df = pd.read_csv(csv_file, encoding="utf-8")
+
+    df = pd.read_csv(
+        archivo,
+        encoding="utf-8"
+    )
+
 except:
-    csv_file.seek(0)
-    df = pd.read_csv(csv_file, encoding="latin-1")
 
-df.columns = [str(c).strip() for c in df.columns]
+    archivo.seek(0)
 
-st.success(f"CSV cargado: {len(df)} encuestas.")
+    df = pd.read_csv(
+        archivo,
+        encoding="latin-1"
+    )
 
+df.columns = [
+    str(c).strip()
+    for c in df.columns
+]
+
+st.success(
+    f"Archivo cargado correctamente: {len(df)} encuestas."
+)
 
 # =========================================================
-# COLUMNAS
+# IDENTIFICAR COLUMNAS
 # =========================================================
 
 col_fecha = buscar_columna(
     df,
-    ["CreationDate", "Creation Date", "Fecha", "Fecha de creación"]
+    [
+        "CreationDate",
+        "Creation Date"
+    ]
 )
 
 col_tienda = buscar_columna(
     df,
-    ["Nombre tienda estudiada", "Nombre de tienda estudiada"]
+    [
+        "Nombre tienda estudiada"
+    ]
 )
 
-col_edad = buscar_columna(df, ["Edad"])
+col_edad = buscar_columna(
+    df,
+    [
+        "Edad"
+    ]
+)
 
 col_genero = buscar_columna(
     df,
-    ["Género", "Genero"]
+    [
+        "Género",
+        "Genero"
+    ]
 )
 
-col_estrato = buscar_columna(df, ["Estrato"])
+col_estrato = buscar_columna(
+    df,
+    [
+        "Estrato"
+    ]
+)
 
 col_ocupacion = buscar_columna(
     df,
-    ["Ocupación actual", "Ocupacion actual"]
+    [
+        "Ocupación actual",
+        "Ocupacion actual"
+    ]
 )
 
 col_motivo = buscar_columna(
     df,
-    ["Por qué compraría ahí?", "Por que compraria ahi?"]
+    [
+        "Por qué compraría ahí?"
+    ]
 )
 
 col_transporte = buscar_columna(
     df,
-    ["Medio de transporte usado para llegar a OXXO"]
+    [
+        "Medio de transporte usado para llegar a OXXO"
+    ]
 )
 
 col_origen = buscar_columna(
     df,
-    ["De dónde viene?", "De donde viene?"]
+    [
+        "De dónde viene?"
+    ]
 )
 
 col_destino = buscar_columna(
     df,
-    ["Hacia dónde se dirige?", "Hacia donde se dirige?"]
+    [
+        "Hacia dónde se dirige?"
+    ]
 )
 
 col_alternativa = buscar_columna(
     df,
     [
-        "Dónde compraría sino es en OXXO?",
-        "Donde compraria sino es en OXXO?"
+        "Dónde compraría sino es en OXXO?"
     ]
 )
 
-col_trafico = encontrar_trafico(df)
-
+col_frecuencia = buscar_columna(
+    df,
+    [
+        "Cada cuanto visita la tienda a la semana?"
+    ]
+)
 
 # =========================================================
-# SELECCIÓN TIENDA
+# VALIDACIÓN
 # =========================================================
 
 if col_tienda is None:
-    st.error("No encontré 'Nombre tienda estudiada'.")
-    st.write(list(df.columns))
+
+    st.error(
+        "No encontré la columna 'Nombre tienda estudiada'."
+    )
+
+    st.write(
+        "Columnas encontradas:"
+    )
+
+    st.write(
+        list(df.columns)
+    )
+
     st.stop()
 
-st.header("2. Seleccionar CR / tienda")
+# =========================================================
+# SELECCIONAR TIENDA
+# =========================================================
 
-tiendas = sorted(
+st.header("2. Seleccionar tienda")
+
+tiendas = (
     df[col_tienda]
     .dropna()
     .astype(str)
@@ -251,15 +485,23 @@ tiendas = sorted(
     .unique()
 )
 
-tienda = st.selectbox(
-    "Selecciona la tienda",
+tiendas = sorted(tiendas)
+
+tienda_seleccionada = st.selectbox(
+    "Selecciona el CR / tienda",
     tiendas
 )
 
-datos = df[
-    df[col_tienda].astype(str).str.strip() == tienda
-].copy()
+# =========================================================
+# FILTRAR
+# =========================================================
 
+datos_tienda = df[
+    df[col_tienda]
+    .astype(str)
+    .str.strip()
+    == tienda_seleccionada
+].copy()
 
 # =========================================================
 # FECHAS
@@ -267,143 +509,166 @@ datos = df[
 
 fecha_inicio = None
 fecha_final = None
-dia_mas = ""
+dia_mas_encuestas = ""
 cantidad_dia_mas = 0
-dias_sin = []
+dias_sin_encuestas = []
 
-if col_fecha:
+if col_fecha is not None:
 
-    datos[col_fecha] = pd.to_datetime(
-        datos[col_fecha],
+    datos_tienda[col_fecha] = pd.to_datetime(
+        datos_tienda[col_fecha],
         errors="coerce"
     )
 
-    fechas = datos[col_fecha].dropna()
+    fechas = (
+        datos_tienda[col_fecha]
+        .dropna()
+    )
 
-    if not fechas.empty:
+    if len(fechas) > 0:
 
         fecha_inicio = fechas.min()
         fecha_final = fechas.max()
 
-        conteo = (
+        conteo_dias = (
             fechas.dt.date
             .value_counts()
             .sort_index()
         )
 
-        if not conteo.empty:
+        if len(conteo_dias) > 0:
 
-            dia_mas = conteo.idxmax()
-            cantidad_dia_mas = int(conteo.max())
+            dia_mas_encuestas = conteo_dias.idxmax()
+            cantidad_dia_mas = int(
+                conteo_dias.max()
+            )
 
-            rango = pd.date_range(
-                fecha_inicio.date(),
-                fecha_final.date(),
+            todos_los_dias = pd.date_range(
+                start=fecha_inicio.date(),
+                end=fecha_final.date(),
                 freq="D"
             ).date
 
-            dias_sin = [
-                d.strftime("%d/%m/%Y")
-                for d in rango
-                if d not in conteo.index
+            dias_sin_encuestas = [
+                dia.strftime("%d/%m/%Y")
+                for dia in todos_los_dias
+                if dia not in conteo_dias.index
             ]
 
-
-def fecha_hora(valor):
-    if valor is None or pd.isna(valor):
-        return ""
-    return pd.to_datetime(valor).strftime("%d/%m/%Y %H:%M")
-
-
-def solo_fecha(valor):
-    if valor is None or pd.isna(valor):
-        return ""
-    return pd.to_datetime(valor).strftime("%d/%m/%Y")
-
-
-if fecha_inicio is not None and fecha_final is not None:
-
-    if fecha_inicio.date() == fecha_final.date():
-        periodo = solo_fecha(fecha_inicio)
-    else:
-        periodo = (
-            f"{solo_fecha(fecha_inicio)} - "
-            f"{solo_fecha(fecha_final)}"
-        )
-else:
-    periodo = ""
-
-
 # =========================================================
-# AUTOMÁTICOS
+# INFORMACIÓN AUTOMÁTICA
 # =========================================================
-
-total_encuestas = len(datos)
-
-trafico_promedio = calcular_trafico(
-    datos,
-    col_trafico
-)
 
 st.header("3. Información automática")
 
-a, b, c, d = st.columns(4)
+total_encuestas = len(datos_tienda)
 
-a.metric("Encuestas", total_encuestas)
+if col_fecha is not None and fecha_inicio is not None:
 
-b.metric(
-    "Tráfico promedio",
-    (
-        f"{trafico_promedio} personas"
-        if trafico_promedio is not None
-        else "N/D"
+    if fecha_inicio.date() == fecha_final.date():
+
+        periodo = formato_fecha(fecha_inicio)
+
+    else:
+
+        periodo = (
+            f"{formato_fecha(fecha_inicio)} - "
+            f"{formato_fecha(fecha_final)}"
+        )
+
+else:
+
+    periodo = ""
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+
+    st.metric(
+        "Encuestas",
+        total_encuestas
     )
-)
 
-c.metric("Inicio", fecha_hora(fecha_inicio))
-d.metric("Finalización", fecha_hora(fecha_final))
+with col2:
 
-st.write(f"**Periodo:** {periodo}")
+    st.metric(
+        "Inicio",
+        formato_fecha_hora(fecha_inicio)
+    )
 
-e, f = st.columns(2)
+with col3:
 
-e.metric("Día con más encuestas", str(dia_mas))
-f.metric("Cantidad ese día", cantidad_dia_mas)
+    st.metric(
+        "Finalización",
+        formato_fecha_hora(fecha_final)
+    )
 
-if dias_sin:
+col4, col5, col6 = st.columns(3)
+
+with col4:
+
+    st.metric(
+        "Día con más encuestas",
+        str(dia_mas_encuestas)
+    )
+
+with col5:
+
+    st.metric(
+        "Cantidad ese día",
+        cantidad_dia_mas
+    )
+
+with col6:
+
+    st.write("**Periodo**")
+    st.write(periodo)
+
+if dias_sin_encuestas:
+
     st.warning(
-        "Días sin encuestas: " +
-        ", ".join(dias_sin)
+        "Días sin encuestas: "
+        + ", ".join(dias_sin_encuestas)
     )
 
+else:
+
+    st.success(
+        "No se encontraron días sin encuestas."
+    )
 
 # =========================================================
-# PERFIL
+# PERFIL DEL CLIENTE
 # =========================================================
 
 st.header("4. Perfil del cliente")
 
 edad_promedio = ""
 
-if col_edad:
-    edades = pd.to_numeric(
-        datos[col_edad],
-        errors="coerce"
-    ).dropna()
+if col_edad is not None:
 
-    if not edades.empty:
-        edad_promedio = round(edades.mean(), 1)
+    edades = pd.to_numeric(
+        datos_tienda[col_edad],
+        errors="coerce"
+    )
+
+    if edades.notna().any():
+
+        edad_promedio = round(
+            edades.mean(),
+            1
+        )
 
 hombres = 0
 mujeres = 0
 
-if col_genero:
+if col_genero is not None:
 
     genero = (
-        datos[col_genero]
+        datos_tienda[col_genero]
         .astype(str)
-        .str.lower()
         .str.strip()
+        .str.lower()
     )
 
     hombres = int(
@@ -420,40 +685,74 @@ if col_genero:
         ).sum()
     )
 
-estrato_tabla = frecuencia(
-    datos,
+estrato_tabla = tabla_frecuencia(
+    datos_tienda,
     col_estrato
 )
 
-ocupacion_tabla = frecuencia(
-    datos,
+ocupacion_tabla = tabla_frecuencia(
+    datos_tienda,
     col_ocupacion
 )
 
 p1, p2, p3, p4 = st.columns(4)
 
-p1.metric(
-    "Edad promedio",
-    f"{edad_promedio} años"
-    if edad_promedio != ""
-    else "N/D"
-)
+with p1:
 
-p2.metric("Hombres", hombres)
-p3.metric("Mujeres", mujeres)
-
-if not estrato_tabla.empty:
-
-    p4.metric(
-        "Estrato principal",
-        (
-            f"{estrato_tabla.iloc[0]['Respuesta']} "
-            f"({estrato_tabla.iloc[0]['%']}%)"
-        )
+    st.metric(
+        "Edad promedio",
+        f"{edad_promedio} años"
+        if edad_promedio != ""
+        else "N/D"
     )
-else:
-    p4.metric("Estrato principal", "N/D")
 
+with p2:
+
+    st.metric(
+        "Hombres",
+        hombres
+    )
+
+with p3:
+
+    st.metric(
+        "Mujeres",
+        mujeres
+    )
+
+with p4:
+
+    if not estrato_tabla.empty:
+
+        estrato_principal = (
+            estrato_tabla.iloc[0]["Respuesta"]
+        )
+
+        estrato_porcentaje = (
+            estrato_tabla.iloc[0]["%"]
+        )
+
+        st.metric(
+            "Estrato principal",
+            f"{estrato_principal} ({estrato_porcentaje}%)"
+        )
+
+    else:
+
+        st.metric(
+            "Estrato principal",
+            "N/D"
+        )
+
+if not ocupacion_tabla.empty:
+
+    st.write("**Ocupación principal**")
+
+    st.dataframe(
+        ocupacion_tabla,
+        use_container_width=True,
+        hide_index=True
+    )
 
 # =========================================================
 # TABLAS
@@ -461,232 +760,232 @@ else:
 
 st.header("5. Información del estudio")
 
-motivo = frecuencia(datos, col_motivo)
-transporte = frecuencia(datos, col_transporte)
-origen = frecuencia(datos, col_origen)
-destino = frecuencia(datos, col_destino)
-alternativa = frecuencia(datos, col_alternativa)
+tablas = {
 
-x1, x2 = st.columns(2)
+    "motivo": tabla_frecuencia(
+        datos_tienda,
+        col_motivo
+    ),
 
-with x1:
-    st.subheader("Principal motivo de compra")
+    "transporte": tabla_frecuencia(
+        datos_tienda,
+        col_transporte
+    ),
+
+    "origen": tabla_frecuencia(
+        datos_tienda,
+        col_origen
+    ),
+
+    "destino": tabla_frecuencia(
+        datos_tienda,
+        col_destino
+    ),
+
+    "alternativa": tabla_frecuencia(
+        datos_tienda,
+        col_alternativa
+    )
+}
+
+t1, t2 = st.columns(2)
+
+with t1:
+
+    st.subheader(
+        "Principal motivo de compra"
+    )
+
     st.dataframe(
-        motivo,
+        tablas["motivo"],
         use_container_width=True,
         hide_index=True
     )
 
-with x2:
-    st.subheader("Medio de llegada")
+with t2:
+
+    st.subheader(
+        "Medio de llegada"
+    )
+
     st.dataframe(
-        transporte,
+        tablas["transporte"],
         use_container_width=True,
         hide_index=True
     )
 
-x3, x4 = st.columns(2)
+t3, t4 = st.columns(2)
 
-with x3:
-    st.subheader("Origen")
+with t3:
+
+    st.subheader(
+        "De dónde viene"
+    )
+
     st.dataframe(
-        origen,
+        tablas["origen"],
         use_container_width=True,
         hide_index=True
     )
 
-with x4:
-    st.subheader("Destino")
+with t4:
+
+    st.subheader(
+        "A dónde se dirige"
+    )
+
     st.dataframe(
-        destino,
+        tablas["destino"],
         use_container_width=True,
         hide_index=True
     )
 
-st.subheader("Alternativa de compra")
+st.subheader(
+    "Alternativa de compra"
+)
 
 st.dataframe(
-    alternativa,
+    tablas["alternativa"],
     use_container_width=True,
     hide_index=True
 )
 
-
 # =========================================================
-# MANUALES
+# INFORMACIÓN MANUAL
 # =========================================================
 
 st.header("6. Información manual")
 
+st.info(
+    "Esta información la diligencias tú porque forma parte del análisis."
+)
+
 percepcion = st.text_area(
-    "Percepción del servicio"
+    "Percepción del servicio",
+    placeholder="Escribe aquí la percepción del servicio..."
 )
 
-radio100 = st.text_input(
-    "Radio 100 m"
+radio = st.text_input(
+    "Radio de influencia",
+    placeholder="Ejemplo: 100m: 47 | 200m: 48 | 300m: 74 | +300m: 67"
 )
 
-radio200 = st.text_input(
-    "Radio 200 m"
+influencia = st.text_area(
+    "¿Le hizo influencia?",
+    placeholder="Escribe aquí el análisis de influencia..."
 )
-
-radio300 = st.text_input(
-    "Radio 300 m"
-)
-
-radio300mas = st.text_input(
-    "Radio +300 m"
-)
-
-insight1 = st.text_area("Insight 1")
-insight2 = st.text_area("Insight 2")
-insight3 = st.text_area("Insight 3")
 
 observaciones = st.text_area(
-    "Observaciones"
+    "Observaciones / información adicional"
 )
 
-st.info(
-    "Las imágenes del radio, isócrona, fachada y registro "
-    "fotográfico se agregan manualmente en Word."
+st.subheader("Insights clave")
+
+insight1 = st.text_area(
+    "Insight 1",
+    placeholder="Escribe el primer insight..."
 )
 
+insight2 = st.text_area(
+    "Insight 2",
+    placeholder="Escribe el segundo insight..."
+)
+
+insight3 = st.text_area(
+    "Insight 3",
+    placeholder="Escribe el tercer insight..."
+)
 
 # =========================================================
-# REEMPLAZOS DE LA PLANTILLA
+# FOTOGRAFÍAS
 # =========================================================
 
-estrato = (
-    estrato_tabla.iloc[0]["Respuesta"]
-    if not estrato_tabla.empty
-    else "N/D"
+st.subheader(
+    "Registro fotográfico"
 )
 
-estrato_pct = (
-    estrato_tabla.iloc[0]["%"]
-    if not estrato_tabla.empty
-    else "N/D"
+fotos = st.file_uploader(
+    "Sube las fotografías de la tienda",
+    type=["jpg", "jpeg", "png"],
+    accept_multiple_files=True
 )
 
-ocupacion = (
-    ocupacion_tabla.iloc[0]["Respuesta"]
-    if not ocupacion_tabla.empty
-    else "N/D"
-)
+# =========================================================
+# PREPARAR DATOS
+# =========================================================
 
-ocupacion_pct = (
-    ocupacion_tabla.iloc[0]["%"]
-    if not ocupacion_tabla.empty
-    else "N/D"
-)
+datos = {
 
-dia_mas_texto = (
-    dia_mas.strftime("%d/%m/%Y")
-    if hasattr(dia_mas, "strftime")
-    else str(dia_mas)
-)
+    "tienda": tienda_seleccionada,
 
-reemplazos = {
+    "encuestas": total_encuestas,
 
-    "[NOMBRE TIENDA / CR]":
-        tienda,
+    "periodo": periodo,
 
-    "[NOMBRE TIENDA]":
-        tienda,
+    "inicio": formato_fecha_hora(
+        fecha_inicio
+    ),
 
-    "[CR]":
-        tienda,
+    "finalizacion": formato_fecha_hora(
+        fecha_final
+    ),
 
-    "[PERIODO]":
-        periodo,
+    "dia_mas_encuestas":
+        str(dia_mas_encuestas),
 
-    "[AUTOMÁTICO]":
-        total_encuestas,
+    "cantidad_dia_mas":
+        cantidad_dia_mas,
 
-    "[ENCUESTAS]":
-        total_encuestas,
+    "edad_promedio":
+        edad_promedio,
 
-    "[TRAFICO PROMEDIO]":
+    "hombres":
+        hombres,
+
+    "mujeres":
+        mujeres,
+
+    "estrato":
         (
-            f"{trafico_promedio} personas"
-            if trafico_promedio is not None
+            estrato_tabla.iloc[0]["Respuesta"]
+            if not estrato_tabla.empty
             else "N/D"
         ),
 
-    "[INICIO]":
-        fecha_hora(fecha_inicio),
-
-    "[FINALIZACION]":
-        fecha_hora(fecha_final),
-
-    "[FECHA / HORA]":
-        fecha_hora(fecha_inicio),
-
-    "[EDAD]":
-        edad_promedio,
-
-    "[CANTIDAD HOMBRES]":
-        hombres,
-
-    "[CANTIDAD MUJERES]":
-        mujeres,
-
-    "[ESTRATO]":
-        estrato,
-
-    "[PORCENTAJE]":
-        estrato_pct,
-
-    "[OCUPACIÓN]":
-        ocupacion,
-
-    "[PORCENTAJE OCUPACION]":
-        ocupacion_pct,
-
-    "[FECHA]":
-        dia_mas_texto,
-
-    "[CANTIDAD]":
-        cantidad_dia_mas,
-
-    "[DIAS_SIN_ENCUESTAS]":
+    "ocupacion":
         (
-            ", ".join(dias_sin)
-            if dias_sin
-            else "Ninguno"
-        ),
-
-    "[RADIO 100]":
-        radio100,
-
-    "[RADIO 200]":
-        radio200,
-
-    "[RADIO 300]":
-        radio300,
-
-    "[RADIO +300]":
-        radio300mas,
-
-    "[PERCEPCIÓN]":
-        percepcion,
-
-    "[PERCEPCION]":
-        percepcion,
-
-    "[INSIGHT 1]":
-        insight1,
-
-    "[INSIGHT 2]":
-        insight2,
-
-    "[INSIGHT 3]":
-        insight3,
-
-    "[OBSERVACIONES / INFORMACIÓN ADICIONAL]":
-        observaciones
+            ocupacion_tabla.iloc[0]["Respuesta"]
+            if not ocupacion_tabla.empty
+            else "N/D"
+        )
 }
 
+manuales = {
+
+    "percepcion":
+        percepcion,
+
+    "radio":
+        radio,
+
+    "influencia":
+        influencia,
+
+    "observaciones":
+        observaciones,
+
+    "insight1":
+        insight1,
+
+    "insight2":
+        insight2,
+
+    "insight3":
+        insight3,
+
+    "fotos":
+        fotos
+}
 
 # =========================================================
 # GENERAR REPORTE
@@ -699,17 +998,14 @@ if st.button(
     type="primary"
 ):
 
-    plantilla_file.seek(0)
-
-    plantilla_bytes = plantilla_file.read()
-
-    reporte = generar_word(
-        plantilla_bytes,
-        reemplazos
+    documento = crear_word(
+        datos,
+        manuales,
+        tablas
     )
 
-    nombre = (
-        f"Reporte_EOD_{tienda}.docx"
+    nombre_archivo = (
+        f"Reporte_EOD_{tienda_seleccionada}.docx"
     )
 
     st.success(
@@ -717,9 +1013,9 @@ if st.button(
     )
 
     st.download_button(
-        label="📥 Descargar informe EOD",
-        data=reporte,
-        file_name=nombre,
+        label="📥 Descargar reporte Word",
+        data=documento,
+        file_name=nombre_archivo,
         mime=(
             "application/vnd.openxmlformats-officedocument."
             "wordprocessingml.document"
