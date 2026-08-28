@@ -5,7 +5,8 @@ from pathlib import Path
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.text.paragraph import Paragraph
+import unicodedata
+import re
 
 
 # =========================================================
@@ -27,7 +28,7 @@ st.write(
 
 
 # =========================================================
-# PLANTILLA WORD
+# PLANTILLA
 # =========================================================
 
 # La plantilla debe estar en el mismo repositorio que app.py.
@@ -45,39 +46,30 @@ RUTA_PLANTILLA = (
 
 def normalizar_texto(texto):
     """
-    Normaliza texto para poder comparar nombres de columnas
-    aunque tengan diferencias de:
-    - mayúsculas
-    - tildes
-    - espacios
-    - guiones
-    - signos de interrogación
+    Normaliza texto para encontrar columnas aunque tengan:
+    - Mayúsculas/minúsculas diferentes
+    - Tildes
+    - Espacios
+    - Guiones bajos
+    - Signos de puntuación
     """
-
-    import unicodedata
 
     texto = str(texto).strip().lower()
 
     texto = unicodedata.normalize(
-        "NFD",
+        "NFKD",
         texto
     )
 
     texto = "".join(
-        c
-        for c in texto
-        if unicodedata.category(c) != "Mn"
+        c for c in texto
+        if not unicodedata.combining(c)
     )
 
-    texto = (
+    texto = re.sub(
+        r"[^a-z0-9]+",
+        "",
         texto
-        .replace(" ", "")
-        .replace("_", "")
-        .replace("-", "")
-        .replace("¿", "")
-        .replace("?", "")
-        .replace("¡", "")
-        .replace("!", "")
     )
 
     return texto
@@ -85,7 +77,8 @@ def normalizar_texto(texto):
 
 def buscar_columna(df, nombres):
     """
-    Busca una columna tolerando diferencias de escritura.
+    Busca una columna aunque existan diferencias
+    de mayúsculas, tildes, espacios, signos, etc.
     """
 
     columnas = {
@@ -160,8 +153,7 @@ def tabla_frecuencia(df, columna):
     ]
 
     tabla["%"] = tabla["Cantidad"].apply(
-        lambda x:
-        porcentaje(
+        lambda x: porcentaje(
             x,
             len(datos)
         )
@@ -172,100 +164,118 @@ def tabla_frecuencia(df, columna):
 
 def formato_fecha(fecha):
 
-    if (
-        fecha is None
-        or pd.isna(fecha)
-    ):
+    if fecha is None or pd.isna(fecha):
         return ""
 
     return pd.to_datetime(
         fecha
-    ).strftime(
-        "%d/%m/%Y"
-    )
+    ).strftime("%d/%m/%Y")
 
 
 def formato_fecha_hora(fecha):
 
-    if (
-        fecha is None
-        or pd.isna(fecha)
-    ):
+    if fecha is None or pd.isna(fecha):
         return ""
 
     return pd.to_datetime(
         fecha
-    ).strftime(
-        "%d/%m/%Y %H:%M"
+    ).strftime("%d/%m/%Y %H:%M")
+
+
+# =========================================================
+# FUNCIONES PARA WORD
+# =========================================================
+
+def obtener_todos_los_parrafos(doc):
+    """
+    Obtiene párrafos normales y párrafos dentro
+    de tablas.
+    """
+
+    parrafos = []
+
+    # Párrafos normales
+    parrafos.extend(
+        doc.paragraphs
     )
 
-
-# =========================================================
-# FUNCIONES PARA EDITAR LA PLANTILLA WORD
-# =========================================================
-
-def obtener_parrafos_de_tablas(doc):
-    """
-    Obtiene todos los párrafos que están dentro de tablas.
-    """
-
+    # Párrafos dentro de tablas
     for table in doc.tables:
 
         for row in table.rows:
 
             for cell in row.cells:
 
-                for paragraph in cell.paragraphs:
+                parrafos.extend(
+                    cell.paragraphs
+                )
 
-                    yield paragraph
+    return parrafos
 
 
-def obtener_todos_los_parrafos(doc):
+def reemplazar_placeholder_en_parrafo(
+    paragraph,
+    placeholder,
+    valor
+):
     """
-    Obtiene párrafos normales y párrafos dentro de tablas.
+    Reemplaza un placeholder en un párrafo.
     """
 
-    for paragraph in doc.paragraphs:
-        yield paragraph
+    texto = paragraph.text
 
-    for paragraph in obtener_parrafos_de_tablas(doc):
-        yield paragraph
+    if placeholder not in texto:
+        return False
+
+    # Primero intentamos reemplazar
+    # dentro de los runs existentes.
+    for run in paragraph.runs:
+
+        if placeholder in run.text:
+
+            run.text = run.text.replace(
+                placeholder,
+                str(valor)
+            )
+
+            return True
+
+    # Si el placeholder está dividido entre
+    # varios runs, reconstruimos el párrafo.
+    texto_nuevo = texto.replace(
+        placeholder,
+        str(valor)
+    )
+
+    paragraph.clear()
+
+    run = paragraph.add_run(
+        texto_nuevo
+    )
+
+    return True
 
 
 def reemplazar_en_parrafos(
     doc,
     reemplazos
 ):
-    """
-    Reemplaza placeholders que estén en párrafos normales.
-    """
 
     for paragraph in doc.paragraphs:
 
         for viejo, nuevo in reemplazos.items():
 
-            if viejo in paragraph.text:
-
-                for run in paragraph.runs:
-
-                    if viejo in run.text:
-
-                        run.text = (
-                            run.text.replace(
-                                viejo,
-                                str(nuevo)
-                            )
-                        )
+            reemplazar_placeholder_en_parrafo(
+                paragraph,
+                viejo,
+                nuevo
+            )
 
 
 def reemplazar_en_tablas(
     doc,
     reemplazos
 ):
-    """
-    Reemplaza placeholders dentro de cualquier
-    celda de tabla.
-    """
 
     for table in doc.tables:
 
@@ -277,18 +287,11 @@ def reemplazar_en_tablas(
 
                     for viejo, nuevo in reemplazos.items():
 
-                        if viejo in paragraph.text:
-
-                            for run in paragraph.runs:
-
-                                if viejo in run.text:
-
-                                    run.text = (
-                                        run.text.replace(
-                                            viejo,
-                                            str(nuevo)
-                                        )
-                                    )
+                        reemplazar_placeholder_en_parrafo(
+                            paragraph,
+                            viejo,
+                            nuevo
+                        )
 
 
 def reemplazar_placeholders(
@@ -307,14 +310,15 @@ def reemplazar_placeholders(
     )
 
 
+# =========================================================
+# ESCRITURA EN CELDAS
+# =========================================================
+
 def escribir_celda(
     cell,
     texto,
     bold=False
 ):
-    """
-    Escribe texto en una celda.
-    """
 
     cell.text = ""
 
@@ -348,14 +352,16 @@ def llenar_tabla_frecuencia(
     max_filas=None
 ):
     """
-    Llena una tabla EXISTENTE de la plantilla.
-    No crea una tabla nueva.
+    Llena las filas que YA existen en la plantilla.
+    No crea tablas nuevas.
+    No cambia el diseño.
     """
 
     if max_filas is None:
 
-        max_filas = (
-            len(table.rows) - 1
+        max_filas = max(
+            len(table.rows) - 1,
+            0
         )
 
     datos = tabla_datos.head(
@@ -364,7 +370,9 @@ def llenar_tabla_frecuencia(
 
     for i in range(max_filas):
 
-        fila = table.rows[i + 1]
+        fila = table.rows[
+            i + 1
+        ]
 
         if i < len(datos):
 
@@ -377,7 +385,9 @@ def llenar_tabla_frecuencia(
 
             escribir_celda(
                 fila.cells[1],
-                int(dato["Cantidad"])
+                int(
+                    dato["Cantidad"]
+                )
             )
 
             escribir_celda(
@@ -394,264 +404,24 @@ def llenar_tabla_frecuencia(
                 )
 
 
-# =========================================================
-# IMÁGENES
-# =========================================================
-
-def poner_imagen_en_celda(
-    cell,
-    imagen,
-    texto_placeholder=None,
-    ancho=5.8
+def identificar_tabla_por_encabezado(
+    table
 ):
     """
-    Borra el contenido de una celda e inserta
-    una imagen.
+    Devuelve los encabezados de una tabla
+    normalizados.
     """
 
-    cell.text = ""
+    if not table.rows:
+        return []
 
-    paragraph = cell.paragraphs[0]
-
-    paragraph.alignment = (
-        WD_ALIGN_PARAGRAPH.CENTER
-    )
-
-    if imagen is None:
-
-        if texto_placeholder:
-
-            run = paragraph.add_run(
-                texto_placeholder
-            )
-
-            run.bold = True
-            run.font.size = Pt(8.5)
-
-        return
-
-    try:
-
-        imagen.seek(0)
-
-        run = paragraph.add_run()
-
-        run.add_picture(
-            imagen,
-            width=Inches(ancho)
-        )
-
-    except Exception as e:
-
-        paragraph.text = (
-            f"No se pudo insertar la imagen: {e}"
-        )
-
-
-# =========================================================
-# FOTO FACHADA
-# =========================================================
-
-def insertar_foto_fachada(
-    doc,
-    imagen
-):
-    """
-    Busca [NOMBRE TIENDA] antes de reemplazarlo
-    y coloca la foto inmediatamente debajo.
-
-    Funciona tanto si el placeholder está en un
-    párrafo normal como dentro de una tabla.
-    """
-
-    if imagen is None:
-        return
-
-    for paragraph in obtener_todos_los_parrafos(doc):
-
-        if "[NOMBRE TIENDA]" in paragraph.text:
-
-            try:
-
-                # Crear nuevo elemento de párrafo
-                nuevo_p = paragraph._p.__class__()
-
-                paragraph._p.addnext(
-                    nuevo_p
-                )
-
-                nuevo_parrafo = Paragraph(
-                    nuevo_p,
-                    paragraph._parent
-                )
-
-                nuevo_parrafo.alignment = (
-                    WD_ALIGN_PARAGRAPH.CENTER
-                )
-
-                run = nuevo_parrafo.add_run()
-
-                imagen.seek(0)
-
-                run.add_picture(
-                    imagen,
-                    width=Inches(3.5)
-                )
-
-                return
-
-            except Exception as e:
-
-                st.warning(
-                    "No se pudo insertar la foto "
-                    f"de fachada: {e}"
-                )
-
-                return
-
-
-# =========================================================
-# IMAGEN POR PLACEHOLDER
-# =========================================================
-
-def poner_imagen_por_placeholder(
-    doc,
-    placeholder,
-    imagen,
-    ancho=5.8
-):
-    """
-    Busca un placeholder de imagen dentro
-    de las tablas de la plantilla.
-    """
-
-    if imagen is None:
-        return False
-
-    for table in doc.tables:
-
-        for row in table.rows:
-
-            for cell in row.cells:
-
-                if placeholder in cell.text:
-
-                    poner_imagen_en_celda(
-                        cell,
-                        imagen,
-                        ancho=ancho
-                    )
-
-                    return True
-
-    return False
-
-
-# =========================================================
-# REGISTRO FOTOGRÁFICO
-# =========================================================
-
-def llenar_registro_fotografico(
-    doc,
-    fotos
-):
-    """
-    La plantilla tiene cuatro espacios:
-
-    FOTO 1 | FOTO 2
-    FOTO 3 | FOTO 4
-    """
-
-    tabla_fotos = None
-
-    for table in doc.tables:
-
-        texto = " ".join(
+    return [
+        normalizar_texto(
             cell.text
-            for row in table.rows
-            for cell in row.cells
         )
-
-        if (
-            "[FOTO_1]" in texto
-            and "[FOTO_4]" in texto
-        ):
-
-            tabla_fotos = table
-
-            break
-
-    if tabla_fotos is None:
-        return
-
-    celdas = [
-
-        tabla_fotos.cell(0, 0),
-
-        tabla_fotos.cell(0, 1),
-
-        tabla_fotos.cell(1, 0),
-
-        tabla_fotos.cell(1, 1)
-
+        for cell in table.rows[0].cells
     ]
 
-    for i, cell in enumerate(celdas):
-
-        if i < len(fotos):
-
-            poner_imagen_en_celda(
-                cell,
-                fotos[i],
-                ancho=2.75
-            )
-
-        else:
-
-            limpiar_celda(
-                cell
-            )
-
-
-# =========================================================
-# INSIGHTS
-# =========================================================
-
-def llenar_insights(
-    doc,
-    insights
-):
-
-    placeholders = [
-
-        "[INSIGHT_1]",
-
-        "[INSIGHT_2]",
-
-        "[INSIGHT_3]"
-
-    ]
-
-    reemplazos = {}
-
-    for placeholder, texto in zip(
-        placeholders,
-        insights
-    ):
-
-        reemplazos[
-            placeholder
-        ] = texto
-
-    reemplazar_placeholders(
-        doc,
-        reemplazos
-    )
-
-
-# =========================================================
-# LLENAR TABLAS DE LA PLANTILLA
-# =========================================================
 
 def llenar_datos_de_tablas(
     doc,
@@ -659,94 +429,27 @@ def llenar_datos_de_tablas(
 ):
     """
     Identifica las tablas por sus encabezados.
-
-    Importante:
-    La tabla de ALTERNATIVA DE COMPRA se identifica
-    mediante:
-
-    COMPETIDOR
-    CANTIDAD
-    %
-
-    Esto evita que quede vacía.
     """
 
     contador_lugar = 0
 
     for table in doc.tables:
 
-        if not table.rows:
-            continue
-
-        encabezados = [
-
-            cell.text
-            .strip()
-            .upper()
-
-            for cell in table.rows[0].cells
-
-        ]
+        encabezados = identificar_tabla_por_encabezado(
+            table
+        )
 
         texto_tabla = " ".join(
             encabezados
         )
 
         # -------------------------------------------------
-        # OCUPACIÓN
-        # -------------------------------------------------
-
-        if (
-            "OCUPACIÓN" in texto_tabla
-            and "CANTIDAD" in texto_tabla
-            and "%" in texto_tabla
-        ):
-
-            llenar_tabla_frecuencia(
-                table,
-                tablas["ocupacion"]
-            )
-
-
-        # -------------------------------------------------
-        # MOTIVO
-        # -------------------------------------------------
-
-        elif (
-            "MOTIVO" in texto_tabla
-            and "CANTIDAD" in texto_tabla
-            and "%" in texto_tabla
-        ):
-
-            llenar_tabla_frecuencia(
-                table,
-                tablas["motivo"]
-            )
-
-
-        # -------------------------------------------------
-        # TRANSPORTE
-        # -------------------------------------------------
-
-        elif (
-            "MEDIO DE TRANSPORTE" in texto_tabla
-            and "CANTIDAD" in texto_tabla
-            and "%" in texto_tabla
-        ):
-
-            llenar_tabla_frecuencia(
-                table,
-                tablas["transporte"]
-            )
-
-
-        # -------------------------------------------------
         # ALTERNATIVA DE COMPRA
         # -------------------------------------------------
 
-        elif (
-            "COMPETIDOR" in texto_tabla
-            and "CANTIDAD" in texto_tabla
+        if (
+            "competidor" in texto_tabla
+            and "cantidad" in texto_tabla
             and "%" in texto_tabla
         ):
 
@@ -755,14 +458,61 @@ def llenar_datos_de_tablas(
                 tablas["alternativa"]
             )
 
+        # -------------------------------------------------
+        # OCUPACIÓN
+        # -------------------------------------------------
+
+        elif (
+            "ocupacion" in texto_tabla
+            and "cantidad" in texto_tabla
+            and "%" in texto_tabla
+        ):
+
+            llenar_tabla_frecuencia(
+                table,
+                tablas["ocupacion"]
+            )
+
+        # -------------------------------------------------
+        # MOTIVO
+        # -------------------------------------------------
+
+        elif (
+            "motivo" in texto_tabla
+            and "cantidad" in texto_tabla
+            and "%" in texto_tabla
+        ):
+
+            llenar_tabla_frecuencia(
+                table,
+                tablas["motivo"]
+            )
+
+        # -------------------------------------------------
+        # TRANSPORTE
+        # -------------------------------------------------
+
+        elif (
+            (
+                "mediotransporte" in texto_tabla
+                or "transporte" in texto_tabla
+            )
+            and "cantidad" in texto_tabla
+            and "%" in texto_tabla
+        ):
+
+            llenar_tabla_frecuencia(
+                table,
+                tablas["transporte"]
+            )
 
         # -------------------------------------------------
         # ORIGEN / DESTINO
         # -------------------------------------------------
 
         elif (
-            "LUGAR" in texto_tabla
-            and "CANTIDAD" in texto_tabla
+            "lugar" in texto_tabla
+            and "cantidad" in texto_tabla
             and "%" in texto_tabla
         ):
 
@@ -784,6 +534,278 @@ def llenar_datos_de_tablas(
 
 
 # =========================================================
+# IMÁGENES
+# =========================================================
+
+def copiar_imagen(imagen):
+
+    """
+    Convierte la imagen subida por Streamlit
+    en un BytesIO independiente.
+
+    Esto evita problemas al reutilizar
+    UploadedFile dentro de Word.
+    """
+
+    if imagen is None:
+        return None
+
+    try:
+
+        contenido = imagen.getvalue()
+
+        buffer = BytesIO(
+            contenido
+        )
+
+        buffer.seek(0)
+
+        return buffer
+
+    except Exception:
+
+        try:
+
+            imagen.seek(0)
+
+            contenido = imagen.read()
+
+            buffer = BytesIO(
+                contenido
+            )
+
+            buffer.seek(0)
+
+            return buffer
+
+        except Exception:
+
+            return None
+
+
+def poner_imagen_en_celda(
+    cell,
+    imagen,
+    ancho=5.8
+):
+    """
+    Inserta una imagen dentro de una celda.
+    """
+
+    # Limpiamos únicamente el contenido
+    # de la celda.
+    cell.text = ""
+
+    paragraph = cell.paragraphs[0]
+
+    paragraph.alignment = (
+        WD_ALIGN_PARAGRAPH.CENTER
+    )
+
+    if imagen is None:
+
+        return
+
+    try:
+
+        imagen.seek(0)
+
+        run = paragraph.add_run()
+
+        run.add_picture(
+            imagen,
+            width=Inches(ancho)
+        )
+
+    except Exception as e:
+
+        paragraph.text = (
+            "No se pudo insertar la imagen."
+        )
+
+
+def poner_imagen_por_placeholder(
+    doc,
+    placeholder,
+    imagen,
+    ancho=5.8
+):
+    """
+    Busca un placeholder dentro de una celda
+    y coloca la imagen allí.
+    """
+
+    if imagen is None:
+        return False
+
+    for table in doc.tables:
+
+        for row in table.rows:
+
+            for cell in row.cells:
+
+                if placeholder in cell.text:
+
+                    imagen_buffer = copiar_imagen(
+                        imagen
+                    )
+
+                    poner_imagen_en_celda(
+                        cell,
+                        imagen_buffer,
+                        ancho
+                    )
+
+                    return True
+
+    # También permite placeholder
+    # en párrafos normales.
+    for paragraph in doc.paragraphs:
+
+        if placeholder in paragraph.text:
+
+            try:
+
+                paragraph.clear()
+
+                paragraph.alignment = (
+                    WD_ALIGN_PARAGRAPH.CENTER
+                )
+
+                imagen_buffer = copiar_imagen(
+                    imagen
+                )
+
+                if imagen_buffer is not None:
+
+                    run = paragraph.add_run()
+
+                    run.add_picture(
+                        imagen_buffer,
+                        width=Inches(ancho)
+                    )
+
+                return True
+
+            except Exception:
+
+                return False
+
+    return False
+
+
+# =========================================================
+# FOTO DE FACHADA
+# =========================================================
+
+def insertar_foto_fachada(
+    doc,
+    imagen
+):
+    """
+    Busca [FOTO_FACHADA] en la plantilla
+    y lo reemplaza por la foto.
+
+    IMPORTANTE:
+    El placeholder debe estar ubicado debajo
+    del nombre de la tienda en la plantilla.
+    """
+
+    if imagen is None:
+        return False
+
+    return poner_imagen_por_placeholder(
+        doc,
+        "[FOTO_FACHADA]",
+        imagen,
+        ancho=3.5
+    )
+
+
+# =========================================================
+# REGISTRO FOTOGRÁFICO
+# =========================================================
+
+def llenar_registro_fotografico(
+    doc,
+    fotos
+):
+    """
+    Busca los placeholders:
+
+    [FOTO_1]
+    [FOTO_2]
+    [FOTO_3]
+    [FOTO_4]
+
+    y los reemplaza con las fotografías.
+    """
+
+    placeholders = [
+        "[FOTO_1]",
+        "[FOTO_2]",
+        "[FOTO_3]",
+        "[FOTO_4]"
+    ]
+
+    for i, placeholder in enumerate(
+        placeholders
+    ):
+
+        if i < len(fotos):
+
+            poner_imagen_por_placeholder(
+                doc,
+                placeholder,
+                fotos[i],
+                ancho=2.65
+            )
+
+        else:
+
+            # Si no hay foto, eliminamos
+            # el placeholder.
+            reemplazar_placeholders(
+                doc,
+                {
+                    placeholder: ""
+                }
+            )
+
+
+# =========================================================
+# INSIGHTS
+# =========================================================
+
+def llenar_insights(
+    doc,
+    insights
+):
+
+    placeholders = [
+        "[INSIGHT_1]",
+        "[INSIGHT_2]",
+        "[INSIGHT_3]"
+    ]
+
+    reemplazos = {}
+
+    for placeholder, texto in zip(
+        placeholders,
+        insights
+    ):
+
+        reemplazos[
+            placeholder
+        ] = texto
+
+    reemplazar_placeholders(
+        doc,
+        reemplazos
+    )
+
+
+# =========================================================
 # CREAR WORD
 # =========================================================
 
@@ -793,44 +815,22 @@ def crear_word(
     tablas
 ):
 
-    """
-    Abre la plantilla existente y llena sus campos.
-
-    NO reconstruye el diseño.
-    """
-
     if not RUTA_PLANTILLA.exists():
 
         raise FileNotFoundError(
-            "No se encontró 'Plantilla_EOD_OXXO.docx'. "
-            "Guarda ese archivo en el mismo repositorio "
-            "donde está app.py."
+            "No se encontró la plantilla "
+            "'Plantilla_EOD_OXXO.docx'. "
+            "Verifica que esté en el mismo "
+            "repositorio que app.py."
         )
 
-    # -----------------------------------------------------
-    # ABRIR PLANTILLA
-    # -----------------------------------------------------
-
+    # Abrimos la plantilla ORIGINAL
     doc = Document(
         str(RUTA_PLANTILLA)
     )
 
-
     # -----------------------------------------------------
-    # FOTO DE FACHADA
-    # -----------------------------------------------------
-    # IMPORTANTE:
-    # Se hace ANTES de reemplazar [NOMBRE TIENDA],
-    # porque la función necesita encontrar ese placeholder.
-
-    insertar_foto_fachada(
-        doc,
-        manuales["foto_fachada"]
-    )
-
-
-    # -----------------------------------------------------
-    # CAMPOS PRINCIPALES
+    # DATOS PRINCIPALES
     # -----------------------------------------------------
 
     reemplazos = {
@@ -871,19 +871,20 @@ def crear_word(
         "[ESTRATO_PORCENTAJE]":
             datos["estrato_porcentaje"],
 
+        "[OCUPACION_PRINCIPAL]":
+            datos["ocupacion"],
+
         "[PERCEPCION_SERVICIO]":
             manuales["percepcion"],
 
         "[RADIO_INFLUENCIA]":
             manuales["radio"]
-
     }
 
     reemplazar_placeholders(
         doc,
         reemplazos
     )
-
 
     # -----------------------------------------------------
     # TABLAS
@@ -894,7 +895,6 @@ def crear_word(
         tablas
     )
 
-
     # -----------------------------------------------------
     # INSIGHTS
     # -----------------------------------------------------
@@ -902,66 +902,54 @@ def crear_word(
     llenar_insights(
         doc,
         [
-
             manuales["insight1"],
-
             manuales["insight2"],
-
             manuales["insight3"]
-
         ]
     )
 
+    # -----------------------------------------------------
+    # FOTO FACHADA
+    # -----------------------------------------------------
+
+    insertar_foto_fachada(
+        doc,
+        manuales["foto_fachada"]
+    )
 
     # -----------------------------------------------------
-    # IMAGEN RADIO
+    # FOTO RADIO
     # -----------------------------------------------------
 
     poner_imagen_por_placeholder(
-
         doc,
-
         "[PEGAR AQUÍ / IMAGEN DEL RADIO DE INFLUENCIA]",
-
         manuales["imagen_radio"],
-
         ancho=5.8
-
     )
 
-
     # -----------------------------------------------------
-    # IMAGEN ISÓCRONA
+    # FOTO ISÓCRONA
     # -----------------------------------------------------
 
     poner_imagen_por_placeholder(
-
         doc,
-
         "[PEGAR AQUÍ / IMAGEN DE LA ISÓCRONA]",
-
         manuales["imagen_isocrona"],
-
         ancho=5.8
-
     )
-
 
     # -----------------------------------------------------
     # REGISTRO FOTOGRÁFICO
     # -----------------------------------------------------
 
     llenar_registro_fotografico(
-
         doc,
-
         manuales["fotos"]
-
     )
 
-
     # -----------------------------------------------------
-    # GENERAR ARCHIVO
+    # GUARDAR
     # -----------------------------------------------------
 
     buffer = BytesIO()
@@ -984,11 +972,8 @@ st.header(
 )
 
 archivo = st.file_uploader(
-
-    "Selecciona el archivo CSV de encuestas",
-
+    "Selecciona el CSV de encuestas",
     type=["csv"]
-
 )
 
 if archivo is None:
@@ -1007,11 +992,8 @@ if archivo is None:
 try:
 
     df = pd.read_csv(
-
         archivo,
-
         encoding="utf-8"
-
     )
 
 except Exception:
@@ -1019,28 +1001,20 @@ except Exception:
     archivo.seek(0)
 
     df = pd.read_csv(
-
         archivo,
-
         encoding="latin-1"
-
     )
 
 
 df.columns = [
-
     str(c).strip()
-
     for c in df.columns
-
 ]
 
 
 st.success(
-
     f"Archivo cargado correctamente: "
     f"{len(df)} encuestas."
-
 )
 
 
@@ -1049,151 +1023,98 @@ st.success(
 # =========================================================
 
 col_fecha = buscar_columna(
-
     df,
-
     [
-
         "CreationDate",
-
         "Creation Date"
-
     ]
-
 )
 
 
 col_tienda = buscar_columna(
-
     df,
-
     [
-
         "Nombre tienda estudiada"
-
     ]
-
 )
 
 
 col_edad = buscar_columna(
-
     df,
-
     [
-
         "Edad"
-
     ]
-
 )
 
 
 col_genero = buscar_columna(
-
     df,
-
     [
-
         "Género",
-
         "Genero"
-
     ]
-
 )
 
 
 col_estrato = buscar_columna(
-
     df,
-
     [
-
         "Estrato"
-
     ]
-
 )
 
 
 col_ocupacion = buscar_columna(
-
     df,
-
     [
-
         "Ocupación actual",
-
         "Ocupacion actual"
-
     ]
-
 )
 
 
 col_motivo = buscar_columna(
-
     df,
-
     [
-
-        "Por qué compraría ahí?"
-
+        "Por qué compraría ahí?",
+        "Por que compraria ahi?"
     ]
-
 )
 
 
 col_transporte = buscar_columna(
-
     df,
-
     [
-
-        "Medio de transporte usado para llegar a OXXO"
-
+        "Medio de transporte usado para llegar a OXXO",
+        "Medio de transporte usado para llegar a OXXO?"
     ]
-
 )
 
 
 col_origen = buscar_columna(
-
     df,
-
     [
-
-        "De dónde viene?"
-
+        "De dónde viene?",
+        "De donde viene?"
     ]
-
 )
 
 
 col_destino = buscar_columna(
-
     df,
-
     [
-
-        "Hacia dónde se dirige?"
-
+        "Hacia dónde se dirige?",
+        "Hacia donde se dirige?"
     ]
-
 )
 
 
 # =========================================================
 # ALTERNATIVA DE COMPRA
 # =========================================================
-# Se incluyen varias posibles formas del encabezado
-# para evitar que la columna quede sin identificar.
 
 col_alternativa = buscar_columna(
-
     df,
-
     [
 
         "Dónde compraría sino es en OXXO?",
@@ -1206,24 +1127,24 @@ col_alternativa = buscar_columna(
 
         "Donde compraria si no es en OXXO?",
 
-        "Donde compraria si no fuera en OXXO?"
+        "Donde compraria si no fuera en OXXO?",
 
+        "Dónde compraría si no fuera OXXO?",
+
+        "Donde compraria si no fuera OXXO?"
     ]
-
 )
 
 
 # =========================================================
-# VALIDACIÓN
+# VALIDACIÓN TIENDA
 # =========================================================
 
 if col_tienda is None:
 
     st.error(
-
         "No encontré la columna "
         "'Nombre tienda estudiada'."
-
     )
 
     st.write(
@@ -1245,21 +1166,13 @@ st.header(
     "2. Seleccionar tienda"
 )
 
-
 tiendas = (
-
     df[col_tienda]
-
     .dropna()
-
     .astype(str)
-
     .str.strip()
-
     .unique()
-
 )
-
 
 tiendas = sorted(
     tiendas
@@ -1267,11 +1180,8 @@ tiendas = sorted(
 
 
 tienda_seleccionada = st.selectbox(
-
     "Selecciona el CR / tienda",
-
     tiendas
-
 )
 
 
@@ -1283,33 +1193,20 @@ st.subheader(
     "Foto de fachada"
 )
 
+st.write(
+    "Sube la fotografía de la fachada correspondiente "
+    "al CR seleccionado."
+)
 
 foto_fachada = st.file_uploader(
-
-    "Sube la foto de fachada de la tienda",
-
+    "Subir foto de fachada",
     type=[
         "jpg",
         "jpeg",
         "png"
     ],
-
     key="foto_fachada"
-
 )
-
-
-if foto_fachada is not None:
-
-    st.image(
-
-        foto_fachada,
-
-        caption="Foto de fachada",
-
-        width=400
-
-    )
 
 
 # =========================================================
@@ -1317,15 +1214,11 @@ if foto_fachada is not None:
 # =========================================================
 
 datos_tienda = df[
-
     df[col_tienda]
-
     .astype(str)
-
     .str.strip()
-
-    == tienda_seleccionada
-
+    ==
+    tienda_seleccionada
 ].copy()
 
 
@@ -1334,7 +1227,6 @@ datos_tienda = df[
 # =========================================================
 
 fecha_inicio = None
-
 fecha_final = None
 
 dia_mas_encuestas = ""
@@ -1347,21 +1239,14 @@ dias_sin_encuestas = []
 if col_fecha is not None:
 
     datos_tienda[col_fecha] = pd.to_datetime(
-
         datos_tienda[col_fecha],
-
         errors="coerce"
-
     )
 
     fechas = (
-
         datos_tienda[col_fecha]
-
         .dropna()
-
     )
-
 
     if len(fechas) > 0:
 
@@ -1369,17 +1254,11 @@ if col_fecha is not None:
 
         fecha_final = fechas.max()
 
-
         conteo_dias = (
-
             fechas.dt.date
-
             .value_counts()
-
             .sort_index()
-
         )
-
 
         if len(conteo_dias) > 0:
 
@@ -1388,31 +1267,24 @@ if col_fecha is not None:
             )
 
             cantidad_dia_mas = int(
-
                 conteo_dias.max()
-
             )
 
-
             todos_los_dias = pd.date_range(
-
                 start=fecha_inicio.date(),
-
                 end=fecha_final.date(),
-
                 freq="D"
-
             ).date
-
 
             dias_sin_encuestas = [
 
-                dia.strftime("%d/%m/%Y")
+                dia.strftime(
+                    "%d/%m/%Y"
+                )
 
                 for dia in todos_los_dias
 
                 if dia not in conteo_dias.index
-
             ]
 
 
@@ -1424,23 +1296,20 @@ st.header(
     "3. Información automática"
 )
 
-
 total_encuestas = len(
     datos_tienda
 )
 
 
 if (
-
     col_fecha is not None
-
     and fecha_inicio is not None
-
 ):
 
     if (
         fecha_inicio.date()
-        == fecha_final.date()
+        ==
+        fecha_final.date()
     ):
 
         periodo = formato_fecha(
@@ -1450,11 +1319,8 @@ if (
     else:
 
         periodo = (
-
             f"{formato_fecha(fecha_inicio)} - "
-
             f"{formato_fecha(fecha_final)}"
-
         )
 
 else:
@@ -1468,37 +1334,28 @@ col1, col2, col3 = st.columns(3)
 with col1:
 
     st.metric(
-
         "Encuestas",
-
         total_encuestas
-
     )
 
 
 with col2:
 
     st.metric(
-
         "Inicio",
-
         formato_fecha_hora(
             fecha_inicio
         )
-
     )
 
 
 with col3:
 
     st.metric(
-
         "Finalización",
-
         formato_fecha_hora(
             fecha_final
         )
-
     )
 
 
@@ -1508,24 +1365,18 @@ col4, col5, col6 = st.columns(3)
 with col4:
 
     st.metric(
-
         "Día con más encuestas",
-
         str(
             dia_mas_encuestas
         )
-
     )
 
 
 with col5:
 
     st.metric(
-
         "Cantidad ese día",
-
         cantidad_dia_mas
-
     )
 
 
@@ -1543,22 +1394,17 @@ with col6:
 if dias_sin_encuestas:
 
     st.warning(
-
         "Días sin encuestas: "
-
-        + ", ".join(
+        +
+        ", ".join(
             dias_sin_encuestas
         )
-
     )
 
 else:
 
     st.success(
-
-        "No se encontraron días "
-        "sin encuestas."
-
+        "No se encontraron días sin encuestas."
     )
 
 
@@ -1577,87 +1423,73 @@ edad_promedio = ""
 if col_edad is not None:
 
     edades = pd.to_numeric(
-
         datos_tienda[col_edad],
-
         errors="coerce"
-
     )
-
 
     if edades.notna().any():
 
         edad_promedio = round(
-
             edades.mean(),
-
             1
-
         )
 
 
 hombres = 0
-
 mujeres = 0
 
 
 if col_genero is not None:
 
     genero = (
-
         datos_tienda[col_genero]
-
         .astype(str)
-
         .str.strip()
-
         .str.lower()
-
     )
-
 
     hombres = int(
-
         genero.str.contains(
-
             "hombre",
-
             na=False
-
         ).sum()
-
     )
 
-
     mujeres = int(
-
         genero.str.contains(
-
             "mujer",
-
             na=False
-
         ).sum()
-
     )
 
 
 estrato_tabla = tabla_frecuencia(
-
     datos_tienda,
-
     col_estrato
-
 )
 
 
 ocupacion_tabla = tabla_frecuencia(
-
     datos_tienda,
-
     col_ocupacion
-
 )
+
+
+if not estrato_tabla.empty:
+
+    estrato_principal = (
+        estrato_tabla.iloc[0]["Respuesta"]
+    )
+
+    estrato_porcentaje = (
+        estrato_tabla.iloc[0]["%"]
+    )
+
+else:
+
+    estrato_principal = "N/D"
+
+    estrato_porcentaje = 0
 
 
 p1, p2, p3, p4 = st.columns(4)
@@ -1666,82 +1498,40 @@ p1, p2, p3, p4 = st.columns(4)
 with p1:
 
     st.metric(
-
         "Edad promedio",
-
-        f"{edad_promedio} años"
-
-        if edad_promedio != ""
-
-        else "N/D"
-
+        (
+            f"{edad_promedio} años"
+            if edad_promedio != ""
+            else "N/D"
+        )
     )
 
 
 with p2:
 
     st.metric(
-
         "Hombres",
-
         hombres
-
     )
 
 
 with p3:
 
     st.metric(
-
         "Mujeres",
-
         mujeres
-
     )
 
 
 with p4:
 
-    if not estrato_tabla.empty:
-
-        estrato_principal = (
-
-            estrato_tabla.iloc[0][
-                "Respuesta"
-            ]
-
-        )
-
-        estrato_porcentaje = (
-
-            estrato_tabla.iloc[0][
-                "%"
-            ]
-
-        )
-
-        st.metric(
-
-            "Estrato principal",
-
+    st.metric(
+        "Estrato principal",
+        (
             f"{estrato_principal} "
             f"({estrato_porcentaje}%)"
-
         )
-
-    else:
-
-        estrato_principal = "N/D"
-
-        estrato_porcentaje = 0
-
-        st.metric(
-
-            "Estrato principal",
-
-            "N/D"
-
-        )
+    )
 
 
 if not ocupacion_tabla.empty:
@@ -1751,13 +1541,9 @@ if not ocupacion_tabla.empty:
     )
 
     st.dataframe(
-
         ocupacion_tabla,
-
         use_container_width=True,
-
         hide_index=True
-
     )
 
 
@@ -1804,12 +1590,38 @@ tablas = {
             datos_tienda,
             col_alternativa
         )
-
 }
 
 
 # =========================================================
-# MOSTRAR TABLAS EN STREAMLIT
+# MOSTRAR SI ENCONTRÓ ALTERNATIVA
+# =========================================================
+
+if col_alternativa is None:
+
+    st.warning(
+        "No se identificó automáticamente la columna "
+        "de alternativa de compra."
+    )
+
+    st.write(
+        "Columnas disponibles:"
+    )
+
+    st.write(
+        list(df.columns)
+    )
+
+else:
+
+    st.success(
+        f"Columna de alternativa identificada: "
+        f"'{col_alternativa}'"
+    )
+
+
+# =========================================================
+# TABLAS EN STREAMLIT
 # =========================================================
 
 t1, t2 = st.columns(2)
@@ -1822,13 +1634,9 @@ with t1:
     )
 
     st.dataframe(
-
         tablas["motivo"],
-
         use_container_width=True,
-
         hide_index=True
-
     )
 
 
@@ -1839,13 +1647,9 @@ with t2:
     )
 
     st.dataframe(
-
         tablas["transporte"],
-
         use_container_width=True,
-
         hide_index=True
-
     )
 
 
@@ -1859,13 +1663,9 @@ with t3:
     )
 
     st.dataframe(
-
         tablas["origen"],
-
         use_container_width=True,
-
         hide_index=True
-
     )
 
 
@@ -1876,13 +1676,9 @@ with t4:
     )
 
     st.dataframe(
-
         tablas["destino"],
-
         use_container_width=True,
-
         hide_index=True
-
     )
 
 
@@ -1890,15 +1686,10 @@ st.subheader(
     "Alternativa de compra"
 )
 
-
 st.dataframe(
-
     tablas["alternativa"],
-
     use_container_width=True,
-
     hide_index=True
-
 )
 
 
@@ -1910,40 +1701,29 @@ st.header(
     "6. Información manual"
 )
 
-
 st.info(
-
     "Diligencia únicamente la información "
     "que corresponde al análisis de la tienda."
-
 )
 
 
 percepcion = st.text_area(
-
     "Percepción del servicio",
-
     placeholder=(
         "Escribe aquí la percepción "
         "del servicio..."
     )
-
 )
 
 
 radio = st.text_input(
-
     "Radio de influencia",
-
     placeholder=(
-
         "Ejemplo: 100m: 47 | "
         "200m: 48 | "
         "300m: 74 | "
         "+300m: 67"
-
     )
-
 )
 
 
@@ -1952,31 +1732,14 @@ radio = st.text_input(
 # =========================================================
 
 imagen_radio = st.file_uploader(
-
     "Pantallazo del radio de influencia",
-
     type=[
         "jpg",
         "jpeg",
         "png"
     ],
-
     key="imagen_radio"
-
 )
-
-
-if imagen_radio is not None:
-
-    st.image(
-
-        imagen_radio,
-
-        caption="Radio de influencia",
-
-        width=500
-
-    )
 
 
 # =========================================================
@@ -1984,31 +1747,14 @@ if imagen_radio is not None:
 # =========================================================
 
 imagen_isocrona = st.file_uploader(
-
     "Pantallazo de la isócrona",
-
     type=[
         "jpg",
         "jpeg",
         "png"
     ],
-
     key="imagen_isocrona"
-
 )
-
-
-if imagen_isocrona is not None:
-
-    st.image(
-
-        imagen_isocrona,
-
-        caption="Isócrona",
-
-        width=500
-
-    )
 
 
 # =========================================================
@@ -2021,35 +1767,26 @@ st.subheader(
 
 
 insight1 = st.text_area(
-
     "Insight 1",
-
     placeholder=(
         "Escribe el primer insight..."
     )
-
 )
 
 
 insight2 = st.text_area(
-
     "Insight 2",
-
     placeholder=(
         "Escribe el segundo insight..."
     )
-
 )
 
 
 insight3 = st.text_area(
-
     "Insight 3",
-
     placeholder=(
         "Escribe el tercer insight..."
     )
-
 )
 
 
@@ -2063,31 +1800,24 @@ st.header(
 
 
 fotos = st.file_uploader(
-
     "Sube las fotografías de la tienda "
-    "(máximo 4 para esta plantilla)",
-
+    "(máximo 4)",
     type=[
         "jpg",
         "jpeg",
         "png"
     ],
-
     accept_multiple_files=True,
-
     key="fotos"
-
 )
 
 
 if len(fotos) > 4:
 
     st.warning(
-
-        "La plantilla tiene 4 espacios "
-        "para fotografías. Solo se utilizarán "
+        "La plantilla tiene 4 espacios para "
+        "fotografías. Solo se utilizarán "
         "las primeras 4."
-
     )
 
     fotos = fotos[:4]
@@ -2139,8 +1869,14 @@ datos = {
         estrato_principal,
 
     "estrato_porcentaje":
-        estrato_porcentaje
+        estrato_porcentaje,
 
+    "ocupacion":
+        (
+            ocupacion_tabla.iloc[0]["Respuesta"]
+            if not ocupacion_tabla.empty
+            else "N/D"
+        )
 }
 
 
@@ -2172,7 +1908,6 @@ manuales = {
 
     "fotos":
         fotos
-
 }
 
 
@@ -2186,62 +1921,41 @@ st.header(
 
 
 if st.button(
-
     "🟢 GENERAR REPORTE",
-
     type="primary"
-
 ):
 
     try:
 
         documento = crear_word(
-
             datos,
-
             manuales,
-
             tablas
-
         )
-
 
         nombre_archivo = (
-
-            f"Reporte_EOD_"
-
+            "Reporte_EOD_"
             f"{tienda_seleccionada}.docx"
-
         )
-
 
         st.success(
-
             "¡Reporte generado correctamente! 🎉"
-
         )
 
-
         st.download_button(
-
             label="📥 Descargar reporte Word",
-
             data=documento,
-
             file_name=nombre_archivo,
-
             mime=(
                 "application/vnd.openxmlformats-officedocument."
                 "wordprocessingml.document"
             )
-
         )
-
 
     except Exception as e:
 
         st.error(
-
-            f"No se pudo generar el reporte: {e}"
-
+            "No se pudo generar el reporte."
         )
+
+        st.exception(e)
